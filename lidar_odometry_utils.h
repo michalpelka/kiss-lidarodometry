@@ -1,11 +1,17 @@
 #ifndef _LIDAR_ODOMETRY_UTILS_H_
 #define _LIDAR_ODOMETRY_UTILS_H_
 
+
+#include <kiss_icp/pipeline/KissICP.hpp>
 #include <portable-file-dialogs.h>
+
 #include "structures.h"
+
 #include <laszip/laszip_api.h>
 #include <iostream>
+
 #include <Eigen/Dense>
+
 #include <vector>
 
 #include <map>
@@ -18,8 +24,6 @@
 #include <imgui_internal.h>
 
 #include <glew.h>
-
-
 
 unsigned long long int get_index(const int16_t x, const int16_t y, const int16_t z);
 unsigned long long int get_rgd_index(const Eigen::Vector3d p, const Eigen::Vector3d b);

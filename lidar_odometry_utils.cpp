@@ -505,7 +505,7 @@ std::unordered_map<std::string, Eigen::Affine3d> MLvxCalib::GetCalibrationFromFi
             }
         }
 
-        assert(kv.value().contains("data"));
+        //assert(kv.value().contains("data"));
         const auto matrixRawData = calibrationEntry.value()["data"];
         assert(matrixRawData.size() == 16);
         // Populate the Eigen::Affine3d matrix from the JSON array

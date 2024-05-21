@@ -1,3 +1,4 @@
+#include <kiss_icp/pipeline/KissICP.hpp>
 #include "lidar_odometry_utils.h"
 #include <portable-file-dialogs.h>
 
@@ -12,10 +13,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <kiss_icp/pipeline/KissICP.hpp>
+
 
 #include <nlohmann/json.hpp>
-
 namespace fs = std::filesystem;
 
 struct RegisteredFrame
@@ -61,7 +61,7 @@ std::vector<Point3Di> toPoint3DiV(const std::vector<Eigen::Vector3d>& points, co
     assert(points.size() == timestamps.size());
     std::vector<Point3Di> result;
     result.reserve(points.size());
-    for (size_t i = 0; i < points.size(); ++i)
+    for (int i = 0; i < points.size(); ++i)
     {
         result.push_back({ points[i], timestamps[i], intensities[i], i, 0 });
     }
@@ -262,8 +262,8 @@ void SaveSession()
         const auto fn = ("scan_lio_" + std::to_string(i) + ".laz");
         lioLazFiles.push_back(fn);
         poses.push_back(frame.pose);
-        std::string filename = fs::path(globals::working_directory) / fn;
-        saveLaz(filename, vecPoints);
+        const auto filename = fs::path(globals::working_directory) / fn;
+        saveLaz(filename.string(), vecPoints);
     }
     const fs::path path(globals::working_directory);
     const fs::path pathReg = path / "lio_initial_poses.reg";
