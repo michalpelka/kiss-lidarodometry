@@ -1,1 +1,1 @@
-# Lidar odometry for HDMapping project utilizin KISS-ICP.
+# Lidar odometry for HDMapping project utilizing KISS-ICP.
