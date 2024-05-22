@@ -35,6 +35,7 @@ else()
         message("Linux, using system freeglut")
         find_package(GLUT REQUIRED)
         include_directories(${GLUT_INCLUDE_DIRS})
+
 endif()
 
 #kiss-icp
@@ -48,5 +49,5 @@ if (WIN32)
     include(3rdparty/kiss-icp/cpp/kiss_icp/cmake/CompilerOptions.cmake)
     target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip3 freeglut_static ${OPENGL_LIBRARIES})
 else ()
-    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${OPENGL_LIBRARIES})
+    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES})
 endif ()
