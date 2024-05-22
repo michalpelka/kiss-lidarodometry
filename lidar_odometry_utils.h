@@ -22,8 +22,10 @@
 #include <imgui_impl_opengl2.h>
 #include <ImGuizmo.h>
 #include <imgui_internal.h>
+#include <GL/glu.h>
+#include <GL/gl.h>
 
-#include <glew.h>
+
 
 unsigned long long int get_index(const int16_t x, const int16_t y, const int16_t z);
 unsigned long long int get_rgd_index(const Eigen::Vector3d p, const Eigen::Vector3d b);
