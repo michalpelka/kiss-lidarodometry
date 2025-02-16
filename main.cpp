@@ -18,15 +18,47 @@
 #include <nlohmann/json.hpp>
 namespace fs = std::filesystem;
 
+struct TrajectoryNode
+{
+    Eigen::Affine3d pose;
+    double hardware_timestamp;
+    double unix_timestamp;
+};
 struct RegisteredFrame
 {
     std::vector<Eigen::Vector3d> points;
     std::vector<float> intensities;
-    std::vector<double> timestamps;
+    std::vector<double> timestamps_offset;
+    std::vector<double> timestamp_hardware;
     Eigen::Affine3d pose;
+    std::vector<TrajectoryNode> trajectory;
 };
 
-std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame>& frames, int maxNumberOfPoints = 2000000)
+
+void SaveTrj(const std::string& pathtrj, const std::vector<TrajectoryNode>& trajectory)
+{
+    std::ofstream outfile;
+    outfile.open(pathtrj);
+    if (!outfile.good())
+    {
+        std::cout << "can not save file: " << pathtrj << std::endl;
+        return;
+    }
+
+    outfile << "timestamp_nanoseconds pose00 pose01 pose02 pose03 pose10 pose11 pose12 pose13 pose20 pose21 pose22 pose23 timestampUnix_nanoseconds" << std::endl;
+    for (int j = 0; j < trajectory.size(); j++)
+    {
+        const auto& trjNode = trajectory[j];
+        auto pose = trjNode.pose.matrix();
+        outfile << std::setprecision(20) << trjNode.hardware_timestamp * 1e9 << " " << std::setprecision(10) << pose(0, 0) << " "
+                << pose(0, 1) << " " << pose(0, 2) << " " << pose(0, 3) << " " << pose(1, 0) << " " << pose(1, 1) << " " << pose(1, 2)
+                << " " << pose(1, 3) << " " << pose(2, 0) << " " << pose(2, 1) << " " << pose(2, 2) << " " << pose(2, 3) << " "
+                << std::setprecision(20) << trjNode.hardware_timestamp * 1e9 << std::endl;
+    }
+    outfile.close();
+}
+
+std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame>& frames, int maxNumberOfPoints = 200000)
 {
     std::vector<RegisteredFrame> result;
     result.resize(1);
@@ -34,15 +66,21 @@ std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame
     Eigen::Affine3d currentIncrement = Eigen::Affine3d::Identity();
     for (const auto& currentOriginalFrame : frames)
     {
+        TrajectoryNode currentTrajectoryNode;
         currentIncrement = result.back().pose.inverse() * currentOriginalFrame.pose;
+        currentTrajectoryNode.hardware_timestamp = currentOriginalFrame.timestamp_hardware.front();
+        currentTrajectoryNode.pose = currentIncrement;
+        result.back().trajectory.push_back(currentTrajectoryNode);
+        std::cout << "Frame at " << currentTrajectoryNode.hardware_timestamp << " has " << currentOriginalFrame.points.size() << " points" << std::endl;
         for (size_t i = 0; i < currentOriginalFrame.points.size(); ++i)
         {
             assert(currentOriginalFrame.points.size() == currentOriginalFrame.intensities.size());
-            assert(currentOriginalFrame.points.size() == currentOriginalFrame.timestamps.size());
+            assert(currentOriginalFrame.points.size() == currentOriginalFrame.timestamps_offset.size());
             auto & buildFrame = result.back();
             buildFrame.points.push_back(currentIncrement * currentOriginalFrame.points[i]);
             buildFrame.intensities.push_back(currentOriginalFrame.intensities[i]);
-            buildFrame.timestamps.push_back(currentOriginalFrame.timestamps[i]);
+            buildFrame.timestamps_offset.push_back(currentOriginalFrame.timestamps_offset[i]);
+            buildFrame.timestamp_hardware.push_back(currentOriginalFrame.timestamp_hardware[i]);
             if (buildFrame.points.size() >= maxNumberOfPoints)
             {
                 result.resize(result.size() + 1);
@@ -226,7 +264,8 @@ void IcpButton()
                         lastFrame.points.emplace_back(point.point);
                         lastFrame.intensities.emplace_back(point.intensity);
                         double deltaTime = point.timestamp - last_timestamp;
-                        lastFrame.timestamps.emplace_back(deltaTime);
+                        lastFrame.timestamps_offset.emplace_back(deltaTime);
+                        lastFrame.timestamp_hardware.emplace_back(point.timestamp);
                         if (deltaTime > globals::params.timestamp_per_icp)
                         {
                             last_timestamp = timestamp;
@@ -239,7 +278,7 @@ void IcpButton()
             for (size_t i = 0; i < globals::registeredFrames.size(); ++i)
             {
                 auto& frame = globals::registeredFrames[i];
-                auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps);
+                auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
                 std::unique_lock lck(globals::mtx);
                 frame.pose = Eigen::Affine3d(icp.pose().matrix());
                 globals::localMap = icp.LocalMap();
@@ -252,35 +291,43 @@ void IcpButton()
 
 void SaveSession()
 {
+    const auto resultDir = fs::path(globals::working_directory) / "lidar_odometry_result_kiss_0";
+    fs::create_directory(resultDir);
     std::vector<Eigen::Affine3d> poses;
     std::vector<std::string> lioLazFiles;
     auto concatframes = ConcatenateFrames(globals::registeredFrames);
     for (size_t i = 0; i < concatframes.size(); ++i)
     {
         auto& frame = concatframes[i];
-        auto vecPoints = toPoint3DiV(frame.points, frame.intensities, frame.timestamps);
+        auto vecPoints = toPoint3DiV(frame.points, frame.intensities, frame.timestamps_offset);
         const auto fn = ("scan_lio_" + std::to_string(i) + ".laz");
         lioLazFiles.push_back(fn);
         poses.push_back(frame.pose);
-        const auto filename = fs::path(globals::working_directory) / fn;
-        saveLaz(filename.string(), vecPoints);
+        std::string filename = fs::path(resultDir) / fn;
+        saveLaz(filename, vecPoints);
+        SaveTrj((fs::path(resultDir) / ("trajectory_lio_" + std::to_string(i) + ".csv")).string(), frame.trajectory);
+
     }
-    const fs::path path(globals::working_directory);
-    const fs::path pathReg = path / "lio_initial_poses.reg";
+    const fs::path path(resultDir);
+    const fs::path pathReg = path / "poses.reg";
+    const fs::path pathRegInitial = path / "lio_initial_poses.reg";
+
     const fs::path pathSession = path / "session.json";
 
 
     save_poses(pathReg.string(), poses, lioLazFiles);
+    save_poses(pathRegInitial.string(), poses, lioLazFiles);
 
     nlohmann::json jj;
     nlohmann::json j;
     j["offset_x"] = 0.0;
     j["offset_y"] = 0.0;
     j["offset_z"] = 0.0;
-    j["folder_name"] = globals::working_directory;
-    j["out_folder_name"] = globals::working_directory;
+    j["lidar_odometry_version"] = "v0.72.0";
+    j["folder_name"] =resultDir;
+    j["out_folder_name"] =resultDir;
     j["poses_file_name"] = pathReg.string();
-    j["initial_poses_file_name"] = path.string();
+    j["initial_poses_file_name"] = pathRegInitial.string();
     j["out_poses_file_name"] = pathReg.string();
     jj["Session Settings"] = j;
     nlohmann::json jlaz_file_names;
