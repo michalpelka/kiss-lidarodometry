@@ -113,6 +113,7 @@ std::vector<Point3Di> decimate(const std::vector<Point3Di> &points, double bucke
 }
 
 
+
 bool saveLaz(const std::string &filename, const std::vector<Point3Di> &points_global)
 {
 
