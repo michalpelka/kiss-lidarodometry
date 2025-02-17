@@ -12,9 +12,13 @@ include_directories(
         3rdparty/portable-file-dialogs-master
 )
 
-# LASzip sources
+
+message("Windows, building laszip from source")
 add_subdirectory(3rdparty/LASzip/)
 include_directories(3rdparty/LASzip/include)
+
+# LASzip sources
+
 
 set(IMGUI_SRCS
         3rdparty/imgui/imgui.cpp
@@ -51,3 +55,15 @@ if (WIN32)
 else ()
     target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES})
 endif ()
+
+install(TARGETS kiss_icp_lidar_odometry DESTINATION bin)
+
+# CPack configuration
+set(CPACK_PACKAGE_NAME "hd_mapping")
+set(CPACK_PACKAGE_VERSION "${HDMAPPING_VERSION_MAJOR}.${HDMAPPING_VERSION_MINOR}.${HDMAPPING_VERSION_PATCH}")
+
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Kiss ICP Lidar Odometry")
+set(CPACK_PACKAGE_CONTACT "michalpelka@gmail.com")
+set(CPACK_GENERATOR "ZIP")
+
+include(CPack)
