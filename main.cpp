@@ -245,31 +245,34 @@ void IcpButton()
             globals::icpRunning.store(true);
             using namespace kiss_icp::pipeline;
             KissICP icp(globals::params.icp_config);
-            globals::registeredFrames.resize(1);
-
-            double last_timestamp = 0;
-
-            for (const auto& file : globals::pointsPerFile)
             {
-                for (const auto& point : file)
+                std::unique_lock lck(globals::mtx);
+                globals::registeredFrames.resize(1);
+
+                double last_timestamp = 0;
+
+                for (const auto& file : globals::pointsPerFile)
                 {
-                    double timestamp = point.timestamp;
-                    if (timestamp > 0)
+                    for (const auto& point : file)
                     {
-                        if (last_timestamp == 0)
+                        double timestamp = point.timestamp;
+                        if (timestamp > 0)
                         {
-                            last_timestamp = timestamp;
-                        }
-                        auto& lastFrame = globals::registeredFrames.back();
-                        lastFrame.points.emplace_back(point.point);
-                        lastFrame.intensities.emplace_back(point.intensity);
-                        double deltaTime = point.timestamp - last_timestamp;
-                        lastFrame.timestamps_offset.emplace_back(deltaTime);
-                        lastFrame.timestamp_hardware.emplace_back(point.timestamp);
-                        if (deltaTime > globals::params.timestamp_per_icp)
-                        {
-                            last_timestamp = timestamp;
-                            globals::registeredFrames.emplace_back();
+                            if (last_timestamp == 0)
+                            {
+                                last_timestamp = timestamp;
+                            }
+                            auto& lastFrame = globals::registeredFrames.back();
+                            lastFrame.points.emplace_back(point.point);
+                            lastFrame.intensities.emplace_back(point.intensity);
+                            double deltaTime = point.timestamp - last_timestamp;
+                            lastFrame.timestamps_offset.emplace_back(deltaTime);
+                            lastFrame.timestamp_hardware.emplace_back(point.timestamp);
+                            if (deltaTime > globals::params.timestamp_per_icp)
+                            {
+                                last_timestamp = timestamp;
+                                globals::registeredFrames.emplace_back();
+                            }
                         }
                     }
                 }
@@ -291,7 +294,7 @@ void IcpButton()
 
 void SaveSession()
 {
-    const auto resultDir = fs::path(globals::working_directory) / "lidar_odometry_result_kiss_0";
+    const fs::path resultDir = fs::path(globals::working_directory) / "lidar_odometry_result_kiss_0";
     fs::create_directory(resultDir);
     std::vector<Eigen::Affine3d> poses;
     std::vector<std::string> lioLazFiles;
@@ -303,9 +306,10 @@ void SaveSession()
         const auto fn = ("scan_lio_" + std::to_string(i) + ".laz");
         lioLazFiles.push_back(fn);
         poses.push_back(frame.pose);
-        std::string filename = fs::path(resultDir) / fn;
-        saveLaz(filename, vecPoints);
-        SaveTrj((fs::path(resultDir) / ("trajectory_lio_" + std::to_string(i) + ".csv")).string(), frame.trajectory);
+        const fs::path lazFilename = resultDir / fs::path(fn);
+        const fs::path trjFileName = resultDir / ("trajectory_lio_" + std::to_string(i) + ".csv");
+        saveLaz(lazFilename.string(), vecPoints);
+        SaveTrj(trjFileName.string(), frame.trajectory);
 
     }
     const fs::path path(resultDir);
@@ -532,7 +536,8 @@ void display()
         for (const auto& frame : globals::registeredFrames)
         {
             glPushMatrix();
-            glMultMatrixd(frame.pose.data());
+            Eigen::Matrix4d mat = frame.pose.matrix();
+            glMultMatrixd(mat.data());
             coordinateSystem(1);
             glPopMatrix();
         }
