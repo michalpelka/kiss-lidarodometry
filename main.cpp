@@ -443,7 +443,7 @@ void lidar_odometry_gui()
         {
             std::ofstream files("params.json");
             auto j = ParamsToJson();
-            files << j.dump();
+            files << j.dump(10);
         }
     }
 
