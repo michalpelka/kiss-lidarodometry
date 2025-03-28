@@ -137,6 +137,42 @@ namespace globals
     std::atomic<float> icpProgress{ 0.0 };
 } // namespace globals
 
+nlohmann::json ParamsToJson()
+{
+    nlohmann::json j;
+    j["filter_threshold_xy"] = globals::params.filter_threshold_xy;
+    j["timestamp_per_icp"] = globals::params.timestamp_per_icp;
+    j["decimation"] =  globals::params.decimation;
+    j["icp_config"]["voxel_size"] = globals::params.icp_config.voxel_size;
+    j["icp_config"]["max_range"] = globals::params.icp_config.max_range;
+    j["icp_config"]["min_range"] = globals::params.icp_config.min_range;
+    j["icp_config"]["max_points_per_voxel"] = globals::params.icp_config.max_points_per_voxel;
+    j["icp_config"]["min_motion_th"] = globals::params.icp_config.min_motion_th;
+    j["icp_config"]["initial_threshold"] = globals::params.icp_config.initial_threshold;
+    j["icp_config"]["max_num_iterations"] = globals::params.icp_config.max_num_iterations;
+    j["icp_config"]["convergence_criterion"] = globals::params.icp_config.convergence_criterion;
+    j["icp_config"]["max_num_threads"] = globals::params.icp_config.max_num_threads;
+    j["icp_config"]["deskew"] = globals::params.icp_config.deskew;
+    return j;
+}
+
+void LoadParamFromJson(const nlohmann::json &j)
+{
+    globals::params.filter_threshold_xy = j["filter_threshold_xy"];
+    globals::params.timestamp_per_icp = j["timestamp_per_icp"];
+    globals::params.decimation = j["decimation"];
+    globals::params.icp_config.voxel_size = j["icp_config"]["voxel_size"];
+    globals::params.icp_config.max_range = j["icp_config"]["max_range"];
+    globals::params.icp_config.min_range = j["icp_config"]["min_range"];
+    globals::params.icp_config.max_points_per_voxel = j["icp_config"]["max_points_per_voxel"];
+    globals::params.icp_config.min_motion_th = j["icp_config"]["min_motion_th"];
+    globals::params.icp_config.initial_threshold = j["icp_config"]["initial_threshold"];
+    globals::params.icp_config.max_num_iterations = j["icp_config"]["max_num_iterations"];
+    globals::params.icp_config.convergence_criterion = j["icp_config"]["convergence_criterion"];
+    globals::params.icp_config.max_num_threads = j["icp_config"]["max_num_threads"];
+    globals::params.icp_config.deskew = j["icp_config"]["deskew"];
+}
+
 void LoadDataButton()
 {
     static std::shared_ptr<pfd::open_file> open_file;
@@ -242,6 +278,7 @@ void IcpButton()
     std::thread icpThread(
         []()
         {
+            const auto startTime = std::chrono::high_resolution_clock::now();
             globals::icpRunning.store(true);
             using namespace kiss_icp::pipeline;
             KissICP icp(globals::params.icp_config);
@@ -288,6 +325,10 @@ void IcpButton()
                 globals::icpProgress.store((float)i / globals::registeredFrames.size());
             }
             globals::icpRunning.store(false);
+            const auto endTime = std::chrono::high_resolution_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime);
+            std::cout << "computation completed, took " << elapsed.count() << " seconds" << std::endl;
+
         });
     icpThread.detach();
 }
@@ -398,6 +439,12 @@ void lidar_odometry_gui()
         ImGui::InputDouble("convergence_criterion", &globals::params.icp_config.convergence_criterion);
         ImGui::InputInt("max_num_threads", &globals::params.icp_config.max_num_threads);
         ImGui::Checkbox("deskew", &globals::params.icp_config.deskew);
+        if (ImGui::Button("saveParams"))
+        {
+            std::ofstream files("params.json");
+            auto j = ParamsToJson();
+            files << j.dump();
+        }
     }
 
     ImGui::End();
@@ -602,6 +649,23 @@ bool initGL(int* argc, char** argv)
 
 int main(int argc, char* argv[])
 {
+    std::string configFn;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            configFn = argv[i + 1];
+            break;
+        }
+    }
+    if (!configFn.empty())
+    {
+        // load json
+        std::ifstream file(configFn);
+        using json = nlohmann::json;
+        json jsonData = json::parse(file);
+        LoadParamFromJson(jsonData);
+    }
     initGL(&argc, argv);
     glutDisplayFunc(display);
     glutMouseFunc(mouse);
