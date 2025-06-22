@@ -10,13 +10,14 @@ include_directories(
         3rdparty/ImGuizmo
         3rdparty/glm
         3rdparty/portable-file-dialogs-master
+        3rd/Fusion/
 )
 
 
 message("Windows, building laszip from source")
 add_subdirectory(3rdparty/LASzip/)
 include_directories(3rdparty/LASzip/include)
-
+add_subdirectory(3rdparty/Fusion)
 # LASzip sources
 
 
@@ -51,9 +52,9 @@ add_executable(kiss_icp_lidar_odometry main.cpp  lidar_odometry_utils.cpp ${IMGU
 set_target_properties(kiss_icp_lidar_odometry PROPERTIES CXX_STANDARD 20)
 if (WIN32)
     include(3rdparty/kiss-icp/cpp/kiss_icp/cmake/CompilerOptions.cmake)
-    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip3 freeglut_static ${OPENGL_LIBRARIES})
+    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip3 freeglut_static ${OPENGL_LIBRARIES} Fusion)
 else ()
-    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES})
+    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES} Fusion)
 endif ()
 
 install(TARGETS kiss_icp_lidar_odometry DESTINATION bin)

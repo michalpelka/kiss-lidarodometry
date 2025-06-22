@@ -24,7 +24,7 @@
 #include <imgui_internal.h>
 #include <GL/glu.h>
 #include <GL/gl.h>
-
+#include "Fusion/Fusion.h"
 
 
 unsigned long long int get_index(const int16_t x, const int16_t y, const int16_t z);
@@ -34,6 +34,15 @@ Eigen::Matrix4d getInterpolatedPose(const std::map<double, Eigen::Matrix4d> &tra
 
 // this function reduces number of points by preserving only first point for each bucket {bucket_x, bucket_y, bucket_z}
 std::vector<Point3Di> decimate(const std::vector<Point3Di> &points, double bucket_x, double bucket_y, double bucket_z);
+
+//! This function load inertial measurement unit data.
+//! This function expects a file with the following format:
+//! timestamp angular_velocity_x angular_velocity_y angular_velocity_z linear_acceleration_x linear_acceleration_y linear_acceleration_z imu_id
+//! @note imu_id is an optional column, if not present, it is assumed that all data comes from the same IMU.
+//! @param imu_file - path to file with IMU data
+//! @param imuToUse - id number of IMU to use, the same index as in pointcloud return by @ref load_point_cloud
+//! @return vector of tuples (std::pair<timestamp, timestampUnix>, angular_velocity, linear_acceleration)
+std::vector<std::tuple<std::pair<double, double>, FusionVector, FusionVector>> load_imu(const std::string &imu_file, int imuToUse);
 
 //! This function load point cloud from LAS/LAZ file.
 //! Optionally it can apply extrinsic calibration to each point.

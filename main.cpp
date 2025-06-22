@@ -14,7 +14,7 @@
 #include <fstream>
 #include <iostream>
 
-
+#include <Fusion/FusionAhrs.h>
 #include <nlohmann/json.hpp>
 namespace fs = std::filesystem;
 
@@ -178,7 +178,7 @@ bool LoadData(std::vector<std::string> input_file_names)
     std::sort(std::begin(input_file_names), std::end(input_file_names));
 
     std::vector<std::string> laz_files;
-
+    std::vector<std::string> csv_files;
     std::for_each(
         std::begin(input_file_names),
         std::end(input_file_names),
@@ -187,6 +187,10 @@ bool LoadData(std::vector<std::string> input_file_names)
             if (fileName.ends_with(".laz") || fileName.ends_with(".las"))
             {
                 laz_files.push_back(fileName);
+            }
+            if (fileName.ends_with(".csv"))
+            {
+                csv_files.push_back(fileName);
             }
         });
 
@@ -245,8 +249,83 @@ bool LoadData(std::vector<std::string> input_file_names)
                 //
             });
         std::cout << "std::transform finished" << std::endl;
+
+        // load IMU data
+        std::vector<std::tuple<std::pair<double, double>, FusionVector, FusionVector>> imu_data;
+
+        for (size_t fileNo = 0; fileNo < csv_files.size(); fileNo++)
+        {
+            const std::string &imufn = csv_files.at(fileNo);
+            fs::path fnSn(imufn);
+            fnSn.replace_extension(".sn");
+
+            // GetId of Imu to use
+            const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn);
+            // GetId of Imu to use
+            int imuNumberToUse = MLvxCalib::GetImuIdToUse(idToSn, imuSnToUse);
+            std::cout << "imuNumberToUse  " << imuNumberToUse << " at: '" << imufn << "'" << std::endl;
+            auto imu = load_imu(imufn.c_str(), imuNumberToUse);
+            std::cout << imufn << " with mapping " << fnSn << std::endl;
+            imu_data.insert(std::end(imu_data), std::begin(imu), std::end(imu));
+        }
+        std::sort(imu_data.begin(), imu_data.end(),
+                   [](const std::tuple<std::pair<double, double>, FusionVector, FusionVector> &a, const std::tuple<std::pair<double, double>, FusionVector, FusionVector> &b)
+                   {
+                       return std::get<0>(a).first < std::get<0>(b).first;
+                   });
+
+        FusionAhrs ahrs;
+        FusionAhrsInitialise(&ahrs);
+        std::map<double, std::pair<Eigen::Matrix4d, double>> trajectory;
+
+        int counter =0;
+        for (const auto &[timestamp_pair, gyr, acc] : imu_data)
+        {
+            const FusionVector gyroscope = {static_cast<float>(gyr.axis.x * 180.0 / M_PI), static_cast<float>(gyr.axis.y * 180.0 / M_PI), static_cast<float>(gyr.axis.z * 180.0 / M_PI)};
+            // const FusionVector gyroscope = {static_cast<float>(gyr.axis.x), static_cast<float>(gyr.axis.y), static_cast<float>(gyr.axis.z)};
+            const FusionVector accelerometer = {acc.axis.x, acc.axis.y, acc.axis.z};
+            static bool first = true;
+
+            static double last_ts;
+            if (first)
+            {
+                FusionAhrsUpdateNoMagnetometer(&ahrs, gyroscope, accelerometer, 1/200.0); // initial update with 100ms
+                first = false;
+                // last_ts = timestamp_pair.first;
+            }
+            else
+            {
+                double curr_ts = timestamp_pair.first;
+
+                double ts_diff = curr_ts - last_ts;
+
+                FusionAhrsUpdateNoMagnetometer(&ahrs, gyroscope, accelerometer, ts_diff);
+
+
+            }
+
+            last_ts = timestamp_pair.first;
+            //
+
+            FusionQuaternion quat = FusionAhrsGetQuaternion(&ahrs);
+
+            Eigen::Quaterniond d{quat.element.w, quat.element.x, quat.element.y, quat.element.z};
+            Eigen::Affine3d t{Eigen::Matrix4d::Identity()};
+            t.rotate(d);
+
+            trajectory[timestamp_pair.first] = std::pair(t.matrix(), timestamp_pair.second);
+            const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
+
+            printf("Roll %0.1f, Pitch %0.1f, Yaw %0.1f [%d of %d]\n", euler.angle.roll, euler.angle.pitch, euler.angle.yaw, counter++, imu_data.size());
+
+
+        }
+
         return true;
+
+
     }
+
     return false;
 }
 
@@ -343,6 +422,7 @@ void IcpButton()
 void SaveSession(const std::string& resultName = "lidar_odometry_result_kiss_0")
 {
     const fs::path resultDir = fs::path(globals::working_directory) / resultName;
+    std::cout << "Saving session to: " << resultDir << std::endl;
     fs::create_directory(resultDir);
     std::vector<Eigen::Affine3d> poses;
     std::vector<std::string> lioLazFiles;
@@ -694,7 +774,7 @@ int main(int argc, char* argv[])
         std::vector<std::string> files;
         for (const auto & entry : fs::directory_iterator(*dataSetToProcess))
         {
-            if (entry.is_regular_file() && (entry.path().extension() == ".laz" ||entry.path().extension() == ".las"))
+            if (entry.is_regular_file() && (entry.path().extension() == ".laz" ||entry.path().extension() == ".las") || entry.path().extension() == ".csv" || entry.path().extension() == ".sn")
             {
                 files.push_back(entry.path().string());
             }
