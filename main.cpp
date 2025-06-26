@@ -205,7 +205,7 @@ bool LoadData(std::vector<std::string> input_file_names)
             fs::create_directory(wdp);
         }
         globals::pointsPerFile.resize(laz_files.size());
-
+        uint64_t  pointsTotal = 0;
         std::transform(
             std::execution::par_unseq,
             std::begin(laz_files),
@@ -221,7 +221,8 @@ bool LoadData(std::vector<std::string> input_file_names)
                 const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
                 auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, preloadedCalibration);
                 auto data = load_point_cloud(fn.c_str(), true, globals::params.filter_threshold_xy, calibration);
-
+                data.shrink_to_fit();
+                pointsTotal += data.size();
                 if (fn == laz_files.front())
                 {
                     fs::path calibrationValidtationFile = wdp / "calibrationValidation.asc";
@@ -245,6 +246,8 @@ bool LoadData(std::vector<std::string> input_file_names)
                 //
             });
         std::cout << "std::transform finished" << std::endl;
+        double memoryUsage =  pointsTotal * sizeof(Point3Di) / (1024.0 * 1024.0 * 1024.0); // in Gb
+        std::cout << "Total points loaded: " << pointsTotal << " mem : " << memoryUsage << "Gb" << std::endl;
         return true;
     }
     return false;
