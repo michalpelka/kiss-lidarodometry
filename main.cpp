@@ -58,6 +58,24 @@ void SaveTrj(const std::string& pathtrj, const std::vector<TrajectoryNode>& traj
     outfile.close();
 }
 
+std::vector<Point3Di> CreateMetascan(const std::vector<RegisteredFrame>& frames)
+{
+    std::vector<Point3Di> result;
+    for (const auto& currentOriginalFrame : frames)
+    {
+        for (size_t i = 0; i < currentOriginalFrame.points.size(); ++i)
+        {
+           const auto& originalPoint = currentOriginalFrame.points[i];
+           const auto transformedPoint = currentOriginalFrame.pose * originalPoint;
+            Point3Di p;
+            p.point = transformedPoint;
+            p.timestamp = currentOriginalFrame.timestamps_offset[i];
+            p.intensity = currentOriginalFrame.intensities[i];;
+            result.push_back(p);
+        }
+    }
+    return result;
+}
 std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame>& frames, int maxNumberOfPoints = 200000)
 {
     std::vector<RegisteredFrame> result;
@@ -126,6 +144,7 @@ namespace globals
         double timestamp_per_icp = 0.05;
         kiss_icp::pipeline::KISSConfig icp_config;
         int decimation = 10;
+        bool useImu = true;
     } params;
 
     std::mutex mtx;
@@ -135,6 +154,7 @@ namespace globals
     std::thread icpThread;
     std::atomic<bool> icpRunning{ false };
     std::atomic<float> icpProgress{ 0.0 };
+    std::map<double, Eigen::Matrix4d> imuTrajectory;
 } // namespace globals
 
 nlohmann::json ParamsToJson()
@@ -153,6 +173,7 @@ nlohmann::json ParamsToJson()
     j["icp_config"]["convergence_criterion"] = globals::params.icp_config.convergence_criterion;
     j["icp_config"]["max_num_threads"] = globals::params.icp_config.max_num_threads;
     j["icp_config"]["deskew"] = globals::params.icp_config.deskew;
+    j["useImu"] = globals::params.useImu;
     return j;
 }
 
@@ -171,6 +192,7 @@ void LoadParamFromJson(const nlohmann::json &j)
     globals::params.icp_config.convergence_criterion = j["icp_config"]["convergence_criterion"];
     globals::params.icp_config.max_num_threads = j["icp_config"]["max_num_threads"];
     globals::params.icp_config.deskew = j["icp_config"]["deskew"];
+    globals::params.useImu = j["useImu"];
 }
 
 bool LoadData(std::vector<std::string> input_file_names)
@@ -276,7 +298,7 @@ bool LoadData(std::vector<std::string> input_file_names)
 
         FusionAhrs ahrs;
         FusionAhrsInitialise(&ahrs);
-        std::map<double, std::pair<Eigen::Matrix4d, double>> trajectory;
+
 
         int counter =0;
         for (const auto &[timestamp_pair, gyr, acc] : imu_data)
@@ -300,8 +322,6 @@ bool LoadData(std::vector<std::string> input_file_names)
                 double ts_diff = curr_ts - last_ts;
 
                 FusionAhrsUpdateNoMagnetometer(&ahrs, gyroscope, accelerometer, ts_diff);
-
-
             }
 
             last_ts = timestamp_pair.first;
@@ -313,12 +333,7 @@ bool LoadData(std::vector<std::string> input_file_names)
             Eigen::Affine3d t{Eigen::Matrix4d::Identity()};
             t.rotate(d);
 
-            trajectory[timestamp_pair.first] = std::pair(t.matrix(), timestamp_pair.second);
-            const FusionEuler euler = FusionQuaternionToEuler(FusionAhrsGetQuaternion(&ahrs));
-
-            printf("Roll %0.1f, Pitch %0.1f, Yaw %0.1f [%d of %d]\n", euler.angle.roll, euler.angle.pitch, euler.angle.yaw, counter++, imu_data.size());
-
-
+            globals::imuTrajectory[timestamp_pair.first] = t.matrix();
         }
 
         return true;
@@ -400,11 +415,34 @@ void IcpButton()
                     }
                 }
             }
+            Eigen::Affine3d lastTrajectory = Eigen::Affine3d::Identity();
 
+            // std::ofstream rotationICP;
+            // rotationICP.open("rotation_icp.csv");
+            // std::ofstream rotationIMU;
+            // rotationIMU.open("rotation_imu.csv");
+            const static Eigen::IOFormat CSVFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n");
             for (size_t i = 0; i < globals::registeredFrames.size(); ++i)
             {
                 auto& frame = globals::registeredFrames[i];
+                // query imu trajectory
+                if (globals::params.useImu)
+                {
+                    const double query_time1 = frame.timestamp_hardware.back();
+                    const double query_time2 = frame.timestamp_hardware.front();
+                    const Eigen::Affine3d imuPose1 {getInterpolatedPose(globals::imuTrajectory, query_time1)};
+                    const Eigen::Affine3d imuPose2 {getInterpolatedPose(globals::imuTrajectory, query_time2)};
+                    const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
+                    auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
+                    imuUpdate = imuUpdate.inverse();
+                    icp.delta() = imuUpdate;
+                    //rotationIMU << imuUpdate.log().transpose().format(CSVFormat) << std::endl;
+                    // icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
+                    // std::cout << "imu pose at " << query_time1 << " is: " << icp.delta().vee().transpose()<< std::endl;
+                }
+
                 auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
+
                 std::unique_lock lck(globals::mtx);
                 frame.pose = Eigen::Affine3d(icp.pose().matrix());
                 globals::localMap = icp.LocalMap();
@@ -418,6 +456,16 @@ void IcpButton()
         });
     icpThread.detach();
 }
+
+void SaveMetascan(const std::string& metcanPath)
+{
+    std::cout << "Saving metascan to: " << metcanPath << std::endl;
+    auto metascan = CreateMetascan(globals::registeredFrames);
+    const fs::path lazFilename = metcanPath;
+    saveLaz(lazFilename.string(), metascan);
+}
+
+
 
 void SaveSession(const std::string& resultName = "lidar_odometry_result_kiss_0")
 {
@@ -504,6 +552,10 @@ void lidar_odometry_gui()
         {
             SaveSession();
         }
+        if (ImGui::Button("save metascan"))
+        {
+            SaveMetascan("metascan.laz");
+        }
         if (globals::icpRunning)
         {
             ImGui::ProgressBar(globals::icpProgress);
@@ -526,6 +578,7 @@ void lidar_odometry_gui()
         ImGui::InputDouble("convergence_criterion", &globals::params.icp_config.convergence_criterion);
         ImGui::InputInt("max_num_threads", &globals::params.icp_config.max_num_threads);
         ImGui::Checkbox("deskew", &globals::params.icp_config.deskew);
+        ImGui::Checkbox("use imu", &globals::params.useImu);
         if (ImGui::Button("saveParams"))
         {
             std::ofstream files("params.json");
@@ -739,6 +792,7 @@ int main(int argc, char* argv[])
     std::optional<std::string> configFn;
     std::optional<std::string> dataSetToProcess;
     std::optional<std::string> resultName;
+    std::optional<std::string> metaScanPath;
     bool gui = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -754,6 +808,10 @@ int main(int argc, char* argv[])
         {
             dataSetToProcess = argv[i + 1];
         }
+        if (arg == "--metascan" && i + 1 < argc)
+        {
+            metaScanPath = argv[i + 1];
+        }
         if (arg == "--resultName" && i + 1 < argc)
         {
             resultName = argv[i + 1];
@@ -767,6 +825,16 @@ int main(int argc, char* argv[])
         using json = nlohmann::json;
         json jsonData = json::parse(file);
         LoadParamFromJson(jsonData);
+    }
+    else
+    {
+        std::ifstream file("params.json");;
+        if (file.is_open())
+        {
+            using json = nlohmann::json;
+            json jsonData = json::parse(file);
+            LoadParamFromJson(jsonData);
+        }
     }
 
     if (dataSetToProcess.has_value())
@@ -786,6 +854,7 @@ int main(int argc, char* argv[])
             std::cout << "LoadData complete" << std::endl;
         }
         IcpButton();
+
 
     }
 
@@ -812,6 +881,10 @@ int main(int argc, char* argv[])
         if (dataSetToProcess.has_value())
         {
             SaveSession(resultName.value_or("lidar_odometry_result_kiss_0"));
+        }
+        if (metaScanPath.has_value())
+        {
+            SaveMetascan(*metaScanPath);
         }
     }
 
