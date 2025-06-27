@@ -178,6 +178,7 @@ bool LoadData(std::vector<std::string> input_file_names)
     std::sort(std::begin(input_file_names), std::end(input_file_names));
 
     std::vector<std::string> laz_files;
+    std::vector<std::string> rosbag_paths;
 
     std::for_each(
         std::begin(input_file_names),
@@ -188,6 +189,14 @@ bool LoadData(std::vector<std::string> input_file_names)
             {
                 laz_files.push_back(fileName);
             }
+#ifdef WITH_ROS2
+            else if (fs::is_directory(fileName)) {
+                // Check if directory contains rosbag files
+                if (fs::exists(fs::path(fileName) / "metadata.yaml")) {
+                    rosbag_paths.push_back(fileName);
+                }
+            }
+#endif
         });
 
     if (input_file_names.size() > 0)
@@ -204,13 +213,46 @@ bool LoadData(std::vector<std::string> input_file_names)
         {
             fs::create_directory(wdp);
         }
-        globals::pointsPerFile.resize(laz_files.size());
-        uint64_t  pointsTotal = 0;
-        std::transform(
-            std::execution::par_unseq,
-            std::begin(laz_files),
-            std::end(laz_files),
-            std::begin(globals::pointsPerFile),
+
+#ifdef WITH_ROS2
+        // Process ROS bag files if any
+        if (!rosbag_paths.empty()) {
+            std::cout << "Processing " << rosbag_paths.size() << " rosbag(s)" << std::endl;
+            
+            for (const auto& bag_path : rosbag_paths) {
+                std::cout << "Loading rosbag: " << bag_path << std::endl;
+                auto topics = get_pointcloud2_topics(bag_path);
+                
+                if (topics.empty()) {
+                    std::cout << "No PointCloud2 topics found in " << bag_path << std::endl;
+                    continue;
+                }
+                
+                auto rosbag_pointclouds = load_rosbag_pointclouds(
+                    bag_path, {}, 0.0, 0.0, globals::params.filter_threshold_xy);
+                
+                for (const auto& pointcloud : rosbag_pointclouds) {
+                    if (!pointcloud.empty()) {
+                        globals::pointsPerFile.push_back(pointcloud);
+                    }
+                }
+            }
+            
+            std::cout << "Loaded " << globals::pointsPerFile.size() << " point clouds from rosbags" << std::endl;
+        }
+#endif
+
+        // Process LAZ files if any
+        if (!laz_files.empty()) {
+            size_t rosbag_count = globals::pointsPerFile.size();
+            globals::pointsPerFile.resize(rosbag_count + laz_files.size());
+            
+            uint64_t pointsTotal = 0;
+            std::transform(
+                std::execution::par_unseq,
+                std::begin(laz_files),
+                std::end(laz_files),
+                std::begin(globals::pointsPerFile) + rosbag_count,
             [&](const std::string& fn)
             {
                 // Load mapping from id to sn
@@ -245,9 +287,19 @@ bool LoadData(std::vector<std::string> input_file_names)
                 // std::cout << fn << std::endl;
                 //
             });
-        std::cout << "std::transform finished" << std::endl;
-        double memoryUsage =  pointsTotal * sizeof(Point3Di) / (1024.0 * 1024.0 * 1024.0); // in Gb
-        std::cout << "Total points loaded: " << pointsTotal << " mem : " << memoryUsage << "Gb" << std::endl;
+            std::cout << "LAZ loading finished" << std::endl;
+            double memoryUsage = pointsTotal * sizeof(Point3Di) / (1024.0 * 1024.0 * 1024.0); // in Gb
+            std::cout << "Total LAZ points loaded: " << pointsTotal << " mem : " << memoryUsage << "Gb" << std::endl;
+        }
+        
+        if (!globals::pointsPerFile.empty()) {
+            uint64_t totalPoints = 0;
+            for (const auto& file : globals::pointsPerFile) {
+                totalPoints += file.size();
+            }
+            double totalMemoryUsage = totalPoints * sizeof(Point3Di) / (1024.0 * 1024.0 * 1024.0); // in Gb
+            std::cout << "Total points loaded from all sources: " << totalPoints << " mem : " << totalMemoryUsage << "Gb" << std::endl;
+        }
         return true;
     }
     return false;
@@ -261,7 +313,14 @@ void LoadDataButton()
     const auto t = [&]()
     {
         std::vector<std::string> filters;
-        auto sel = pfd::open_file("Load las files", "C:\\", filters, true).result();
+#ifdef WITH_ROS2
+        filters.push_back("LAS/LAZ and ROS bags");
+        filters.push_back("*.las *.laz");
+#else
+        filters.push_back("LAS/LAZ files");
+        filters.push_back("*.las *.laz");
+#endif
+        auto sel = pfd::open_file("Load data files", "C:\\", filters, true).result();
         for (int i = 0; i < sel.size(); i++)
         {
             input_file_names.push_back(sel[i]);
@@ -276,6 +335,32 @@ void LoadDataButton()
         std::cout << "please select files correctly" << std::endl;
     }
 }
+
+#ifdef WITH_ROS2
+void LoadRosbagButton()
+{
+    static std::shared_ptr<pfd::select_folder> select_folder;
+    std::vector<std::string> input_file_names;
+    ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)select_folder);
+    
+    const auto t = [&]()
+    {
+        auto folder_path = pfd::select_folder("Select rosbag directory", std::filesystem::current_path().string()).result();
+        if (!folder_path.empty())
+        {
+            input_file_names.push_back(folder_path);
+        }
+    };
+    std::thread t1(t);
+    t1.join();
+
+    if (!input_file_names.empty() && !LoadData(input_file_names))
+    {
+        pfd::message("Error", "Failed to load rosbag data", pfd::choice::ok);
+        std::cout << "Failed to load rosbag data" << std::endl;
+    }
+}
+#endif
 
 
 void IcpButton()
@@ -418,6 +503,13 @@ void lidar_odometry_gui()
         {
             LoadDataButton();
         }
+#ifdef WITH_ROS2
+        ImGui::SameLine();
+        if (ImGui::Button("load rosbag"))
+        {
+            LoadRosbagButton();
+        }
+#endif
 
         if (ImGui::Button("icp"))
         {
@@ -662,6 +754,7 @@ int main(int argc, char* argv[])
     std::optional<std::string> configFn;
     std::optional<std::string> dataSetToProcess;
     std::optional<std::string> resultName;
+    std::optional<std::string> rosbagPath;
     bool gui = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -681,6 +774,12 @@ int main(int argc, char* argv[])
         {
             resultName = argv[i + 1];
         }
+#ifdef WITH_ROS2
+        if (arg == "--rosbag" && i + 1 < argc)
+        {
+            rosbagPath = argv[i + 1];
+        }
+#endif
     }
 
     if (configFn.has_value())
@@ -709,8 +808,20 @@ int main(int argc, char* argv[])
             std::cout << "LoadData complete" << std::endl;
         }
         IcpButton();
-
     }
+
+#ifdef WITH_ROS2
+    if (rosbagPath.has_value())
+    {
+        std::vector<std::string> rosbag_files = { *rosbagPath };
+        const bool isLoadOk = LoadData(rosbag_files);
+        if (isLoadOk)
+        {
+            std::cout << "Rosbag LoadData complete" << std::endl;
+        }
+        IcpButton();
+    }
+#endif
 
     if (gui)
     {
@@ -732,7 +843,7 @@ int main(int argc, char* argv[])
             std::this_thread::sleep_for(std::chrono::seconds(1));
             std::cout << "ICP in progress : " << 100.0 *globals::icpProgress << " % "<< std::endl;
         }
-        if (dataSetToProcess.has_value())
+        if (dataSetToProcess.has_value() || rosbagPath.has_value())
         {
             SaveSession(resultName.value_or("lidar_odometry_result_kiss_0"));
         }

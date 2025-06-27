@@ -3,6 +3,28 @@ project(kiss-lidarodometry)
 
 find_package(OpenGL REQUIRED)
 
+# Option to enable ROS 2 support (Linux only)
+option(WITH_ROS2 "Enable ROS 2 rosbag support" OFF)
+
+# ROS 2 dependencies (Linux only)
+if(WITH_ROS2 AND NOT WIN32)
+    find_package(ament_cmake QUIET)
+    find_package(rclcpp QUIET)
+    find_package(sensor_msgs QUIET)
+    find_package(rosbag2_cpp QUIET)
+    find_package(rosbag2_storage QUIET)
+    
+    if(ament_cmake_FOUND AND rclcpp_FOUND AND sensor_msgs_FOUND AND rosbag2_cpp_FOUND)
+        set(ROS2_FOUND TRUE)
+        message(STATUS "ROS 2 dependencies found - enabling rosbag support")
+        add_definitions(-DWITH_ROS2)
+    else()
+        set(ROS2_FOUND FALSE)
+        message(WARNING "ROS 2 dependencies not found - rosbag support disabled")
+        set(WITH_ROS2 OFF)
+    endif()
+endif()
+
 include_directories(
         3rdparty/
         3rdparty/imgui
@@ -32,7 +54,7 @@ set(IMGUI_SRCS
 set(GIZMO 3rdparty/ImGuizmo/ImGuizmo.cpp )
 
 if (WIN32)
-        message("Windows, bulding freeglut from source")
+        message("Windows, building freeglut from source")
         include_directories(3rdparty/freeglut-3.2.2/include/)
         add_subdirectory(3rdparty/freeglut-3.2.2)
 else()
@@ -53,7 +75,18 @@ if (WIN32)
     include(3rdparty/kiss-icp/cpp/kiss_icp/cmake/CompilerOptions.cmake)
     target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip3 freeglut_static ${OPENGL_LIBRARIES})
 else ()
-    target_link_libraries(kiss_icp_lidar_odometry  kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES})
+    set(LINUX_LIBS kiss_icp_pipeline laszip ${GLUT_LIBRARIES} ${GLEW_LIBRARIES} ${OPENGL_LIBRARIES})
+    
+    # Add ROS 2 libraries if available
+    if(ROS2_FOUND)
+        ament_target_dependencies(kiss_icp_lidar_odometry
+            rclcpp
+            sensor_msgs
+            rosbag2_cpp
+            rosbag2_storage)
+    endif()
+    
+    target_link_libraries(kiss_icp_lidar_odometry ${LINUX_LIBS})
 endif ()
 
 install(TARGETS kiss_icp_lidar_odometry DESTINATION bin)

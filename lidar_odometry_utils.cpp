@@ -607,3 +607,215 @@ int MLvxCalib::GetImuIdToUse(const std::unordered_map<int, std::string>& idToSn,
     return 0;
 }
 
+#ifdef WITH_ROS2
+#include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <rosbag2_cpp/typesupport_helpers.hpp>
+
+std::vector<std::string> get_pointcloud2_topics(const std::string& rosbag_path) {
+    std::vector<std::string> pointcloud_topics;
+    
+    try {
+        rosbag2_storage::StorageOptions storage_options;
+        storage_options.uri = rosbag_path;
+        storage_options.storage_id = "sqlite3";
+        
+        rosbag2_cpp::ConverterOptions converter_options;
+        converter_options.input_serialization_format = "cdr";
+        converter_options.output_serialization_format = "cdr";
+        
+        rosbag2_cpp::readers::SequentialReader reader;
+        reader.open(storage_options, converter_options);
+        
+        auto metadata = reader.get_metadata();
+        for (const auto& topic_info : metadata.topics_with_message_count) {
+            if (topic_info.topic_metadata.type == "sensor_msgs/msg/PointCloud2") {
+                pointcloud_topics.push_back(topic_info.topic_metadata.name);
+                std::cout << "Found PointCloud2 topic: " << topic_info.topic_metadata.name 
+                         << " (" << topic_info.message_count << " messages)" << std::endl;
+            }
+        }
+        
+        reader.close();
+    } catch (const std::exception& e) {
+        std::cerr << "Error reading rosbag metadata: " << e.what() << std::endl;
+    }
+    
+    return pointcloud_topics;
+}
+
+std::vector<Point3Di> pointcloud2_to_point3di(
+    const sensor_msgs::msg::PointCloud2& cloud_msg,
+    uint8_t lidar_id,
+    double filter_threshold_xy) {
+    
+    std::vector<Point3Di> points;
+
+    // Find field indices
+    int x_idx = -1, y_idx = -1, z_idx = -1, intensity_idx = -1, timestamp_idx = -1;
+
+    for (size_t i = 0; i < cloud_msg.fields.size(); ++i) {
+        const auto& field = cloud_msg.fields[i];
+        if (field.name == "x") x_idx = i;
+        else if (field.name == "y") y_idx = i;
+        else if (field.name == "z") z_idx = i;
+        else if (field.name == "intensity") intensity_idx = i;
+        else if (field.name == "t" || field.name == "timestamp" || field.name == "time") {
+            timestamp_idx = i;
+        }
+    }
+
+    if (x_idx == -1 || y_idx == -1 || z_idx == -1) {
+        std::cerr << "PointCloud2 missing required x, y, z fields" << std::endl;
+        return points;
+    }
+
+    // Use iterators for efficient access
+    sensor_msgs::PointCloud2ConstIterator<float> iter_x(cloud_msg, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_y(cloud_msg, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_z(cloud_msg, "z");
+//
+    // Optional intensity iterator
+    std::unique_ptr<sensor_msgs::PointCloud2ConstIterator<float>> iter_intensity;
+    if (intensity_idx != -1) {
+        iter_intensity = std::make_unique<sensor_msgs::PointCloud2ConstIterator<float>>(cloud_msg, "intensity");
+    }
+//
+
+
+
+    // Convert message timestamp to seconds
+    double msg_timestamp = cloud_msg.header.stamp.sec + cloud_msg.header.stamp.nanosec * 1e-9;
+
+    points.reserve(cloud_msg.width * cloud_msg.height);
+
+    for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
+        float x = *iter_x;
+        float y = *iter_y;
+        float z = *iter_z;
+
+        // Apply xy filtering
+        if (filter_threshold_xy > 0.0) {
+            double xy_dist = sqrt(x * x + y * y);
+            if (xy_dist <= filter_threshold_xy) {
+                continue;
+            }
+        }
+
+        Point3Di point;
+        point.point = Eigen::Vector3d(x, y, z);
+        point.lidarid = lidar_id;
+        point.index_pose = 0;
+
+        // Extract intensity
+        if (iter_intensity) {
+            point.intensity = **iter_intensity;
+            ++(*iter_intensity);
+        } else {
+            point.intensity = 0.0f;
+        }
+
+
+        points.push_back(point);
+    }
+
+    std::cout << "Converted PointCloud2 with " << (cloud_msg.width * cloud_msg.height)
+              << " input points to " << points.size() << " Point3Di points" << std::endl;
+
+    return points;
+}
+
+std::vector<std::vector<Point3Di>> load_rosbag_pointclouds(
+    const std::string& rosbag_path,
+    const std::vector<std::string>& topic_filters,
+    double start_time_sec,
+    double end_time_sec,
+    double filter_threshold_xy) {
+    
+    std::vector<std::vector<Point3Di>> all_pointclouds;
+    
+//    try {
+//        rosbag2_storage::StorageOptions storage_options;
+//        storage_options.uri = rosbag_path;
+//        storage_options.storage_id = "sqlite3";
+//
+//        rosbag2_cpp::ConverterOptions converter_options;
+//        converter_options.input_serialization_format = "cdr";
+//        converter_options.output_serialization_format = "cdr";
+//
+//        rosbag2_cpp::readers::SequentialReader reader;
+//        reader.open(storage_options, converter_options);
+//
+//        // Get available topics if no filters specified
+//        std::vector<std::string> topics_to_read = topic_filters;
+//        if (topics_to_read.empty()) {
+//            topics_to_read = get_pointcloud2_topics(rosbag_path);
+//        }
+//
+//        if (topics_to_read.empty()) {
+//            std::cout << "No PointCloud2 topics found in rosbag" << std::endl;
+//            return all_pointclouds;
+//        }
+//
+//        // Set topic filters
+//        rosbag2_storage::StorageFilter filter;
+//        filter.topics = topics_to_read;
+//        reader.set_filter(filter);
+//
+//        std::cout << "Reading PointCloud2 messages from topics: ";
+//        for (const auto& topic : topics_to_read) {
+//            std::cout << topic << " ";
+//        }
+//        std::cout << std::endl;
+//
+//        auto serialization_library = rosbag2_cpp::get_typesupport_library(
+//            "sensor_msgs/msg/PointCloud2", "rosidl_typesupport_cpp");
+//        auto type_support = rosbag2_cpp::get_typesupport_handle(
+//            "sensor_msgs/msg/PointCloud2", "rosidl_typesupport_cpp", serialization_library);
+//
+//        rclcpp::Serialization<sensor_msgs::msg::PointCloud2> serialization;
+//
+//        uint64_t start_time_ns = static_cast<uint64_t>(start_time_sec * 1e9);
+//        uint64_t end_time_ns = end_time_sec > 0.0 ? static_cast<uint64_t>(end_time_sec * 1e9) : UINT64_MAX;
+//
+//        size_t total_messages = 0;
+//        while (reader.has_next()) {
+//            auto bag_message = reader.read_next();
+//
+//            // Time filtering
+//            if (bag_message->time_stamp < start_time_ns || bag_message->time_stamp > end_time_ns) {
+//                continue;
+//            }
+//
+//            try {
+//                sensor_msgs::msg::PointCloud2 cloud_msg;
+//                rclcpp::SerializedMessage serialized_msg(*bag_message->serialized_data);
+//                serialization.deserialize_message(&serialized_msg, &cloud_msg);
+//
+//                // Assign lidar ID based on topic (simple hash for now)
+//                uint8_t lidar_id = std::hash<std::string>{}(bag_message->topic_name) % 256;
+//
+//                auto points = pointcloud2_to_point3di(cloud_msg, lidar_id, filter_threshold_xy);
+//                if (!points.empty()) {
+//                    all_pointclouds.push_back(std::move(points));
+//                    ++total_messages;
+//                }
+//
+//            } catch (const std::exception& e) {
+//                std::cerr << "Error processing message from topic " << bag_message->topic_name
+//                         << ": " << e.what() << std::endl;
+//            }
+//        }
+//
+//        reader.close();
+//
+//        std::cout << "Successfully processed " << total_messages
+//                  << " PointCloud2 messages from rosbag" << std::endl;
+//
+//    } catch (const std::exception& e) {
+//        std::cerr << "Error reading rosbag: " << e.what() << std::endl;
+//    }
+    
+    return all_pointclouds;
+}
+#endif
+

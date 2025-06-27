@@ -25,6 +25,14 @@
 #include <GL/glu.h>
 #include <GL/gl.h>
 
+#ifdef WITH_ROS2
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <rosbag2_cpp/readers/sequential_reader.hpp>
+#include <rosbag2_storage/storage_options.hpp>
+#include <rosbag2_cpp/converter_interfaces/serialization_format_converter.hpp>
+#endif
+
 
 
 unsigned long long int get_index(const int16_t x, const int16_t y, const int16_t z);
@@ -46,6 +54,37 @@ std::vector<Point3Di> decimate(const std::vector<Point3Di> &points, double bucke
 //! @return vector of points of @ref Point3Di type
 std::vector<Point3Di> load_point_cloud(const std::string &lazFile, bool ommit_points_with_timestamp_equals_zero, double filter_threshold_xy,
                                        const std::unordered_map<int, Eigen::Affine3d>& calibrations);
+
+#ifdef WITH_ROS2
+//! Load point cloud data from ROS 2 rosbag files
+//! @param rosbag_path - path to rosbag directory
+//! @param topic_filters - list of PointCloud2 topics to extract (empty = all topics)
+//! @param start_time_sec - start time in seconds (0 = from beginning)  
+//! @param end_time_sec - end time in seconds (0 = to end)
+//! @param filter_threshold_xy - threshold for filtering points in xy plane
+//! @return vector of points grouped by topic/timestamp
+std::vector<std::vector<Point3Di>> load_rosbag_pointclouds(
+    const std::string& rosbag_path,
+    const std::vector<std::string>& topic_filters = {},
+    double start_time_sec = 0.0,
+    double end_time_sec = 0.0,
+    double filter_threshold_xy = 0.0);
+
+//! Convert ROS PointCloud2 message to Point3Di vector
+//! @param cloud_msg - ROS PointCloud2 message
+//! @param lidar_id - ID to assign to all points (default 0)
+//! @param filter_threshold_xy - threshold for filtering points in xy plane
+//! @return vector of Point3Di structures
+std::vector<Point3Di> pointcloud2_to_point3di(
+    const sensor_msgs::msg::PointCloud2& cloud_msg,
+    uint8_t lidar_id = 0,
+    double filter_threshold_xy = 0.0);
+
+//! Get available PointCloud2 topics from rosbag
+//! @param rosbag_path - path to rosbag directory
+//! @return vector of topic names with PointCloud2 message type
+std::vector<std::string> get_pointcloud2_topics(const std::string& rosbag_path);
+#endif
 
 bool saveLaz(const std::string &filename, const std::vector<Point3Di> &points_global);
 bool save_poses(const std::string file_name, std::vector<Eigen::Affine3d> m_poses, std::vector<std::string> filenames);
