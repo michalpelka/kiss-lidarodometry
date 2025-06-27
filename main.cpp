@@ -173,23 +173,8 @@ void LoadParamFromJson(const nlohmann::json &j)
     globals::params.icp_config.deskew = j["icp_config"]["deskew"];
 }
 
-void LoadDataButton()
+bool LoadData(std::vector<std::string> input_file_names)
 {
-    static std::shared_ptr<pfd::open_file> open_file;
-    std::vector<std::string> input_file_names;
-    ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)open_file);
-    const auto t = [&]()
-    {
-        std::vector<std::string> filters;
-        auto sel = pfd::open_file("Load las files", "C:\\", filters, true).result();
-        for (int i = 0; i < sel.size(); i++)
-        {
-            input_file_names.push_back(sel[i]);
-        }
-    };
-    std::thread t1(t);
-    t1.join();
-
     std::sort(std::begin(input_file_names), std::end(input_file_names));
 
     std::vector<std::string> laz_files;
@@ -220,7 +205,7 @@ void LoadDataButton()
             fs::create_directory(wdp);
         }
         globals::pointsPerFile.resize(laz_files.size());
-
+        uint64_t  pointsTotal = 0;
         std::transform(
             std::execution::par_unseq,
             std::begin(laz_files),
@@ -236,7 +221,8 @@ void LoadDataButton()
                 const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
                 auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, preloadedCalibration);
                 auto data = load_point_cloud(fn.c_str(), true, globals::params.filter_threshold_xy, calibration);
-
+                data.shrink_to_fit();
+                pointsTotal += data.size();
                 if (fn == laz_files.front())
                 {
                     fs::path calibrationValidtationFile = wdp / "calibrationValidation.asc";
@@ -260,13 +246,37 @@ void LoadDataButton()
                 //
             });
         std::cout << "std::transform finished" << std::endl;
+        double memoryUsage =  pointsTotal * sizeof(Point3Di) / (1024.0 * 1024.0 * 1024.0); // in Gb
+        std::cout << "Total points loaded: " << pointsTotal << " mem : " << memoryUsage << "Gb" << std::endl;
+        return true;
     }
-    else
+    return false;
+}
+
+void LoadDataButton()
+{
+    static std::shared_ptr<pfd::open_file> open_file;
+    std::vector<std::string> input_file_names;
+    ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)open_file);
+    const auto t = [&]()
+    {
+        std::vector<std::string> filters;
+        auto sel = pfd::open_file("Load las files", "C:\\", filters, true).result();
+        for (int i = 0; i < sel.size(); i++)
+        {
+            input_file_names.push_back(sel[i]);
+        }
+    };
+    std::thread t1(t);
+    t1.join();
+
+    if (!LoadData(input_file_names))
     {
         pfd::message("Error", "please select files correctly", pfd::choice::ok);
         std::cout << "please select files correctly" << std::endl;
     }
 }
+
 
 void IcpButton()
 {
@@ -274,12 +284,12 @@ void IcpButton()
     {
         return;
     }
-
+    globals::icpRunning.store(true);
     std::thread icpThread(
         []()
         {
             const auto startTime = std::chrono::high_resolution_clock::now();
-            globals::icpRunning.store(true);
+
             using namespace kiss_icp::pipeline;
             KissICP icp(globals::params.icp_config);
             {
@@ -333,9 +343,9 @@ void IcpButton()
     icpThread.detach();
 }
 
-void SaveSession()
+void SaveSession(const std::string& resultName = "lidar_odometry_result_kiss_0")
 {
-    const fs::path resultDir = fs::path(globals::working_directory) / "lidar_odometry_result_kiss_0";
+    const fs::path resultDir = fs::path(globals::working_directory) / resultName;
     fs::create_directory(resultDir);
     std::vector<Eigen::Affine3d> poses;
     std::vector<std::string> lioLazFiles;
@@ -649,33 +659,84 @@ bool initGL(int* argc, char** argv)
 
 int main(int argc, char* argv[])
 {
-    std::string configFn;
-
+    std::optional<std::string> configFn;
+    std::optional<std::string> dataSetToProcess;
+    std::optional<std::string> resultName;
+    bool gui = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
             configFn = argv[i + 1];
             break;
         }
+        if (arg == "--nogui")
+        {
+            gui = false;
+        }
+        if (arg == "--process" && i + 1 < argc)
+        {
+            dataSetToProcess = argv[i + 1];
+        }
+        if (arg == "--resultName" && i + 1 < argc)
+        {
+            resultName = argv[i + 1];
+        }
     }
-    if (!configFn.empty())
+
+    if (configFn.has_value())
     {
         // load json
-        std::ifstream file(configFn);
+        std::ifstream file(*configFn);
         using json = nlohmann::json;
         json jsonData = json::parse(file);
         LoadParamFromJson(jsonData);
     }
-    initGL(&argc, argv);
-    glutDisplayFunc(display);
-    glutMouseFunc(mouse);
-    glutMotionFunc(motion);
-    glutMouseWheelFunc(wheel);
-    glutMainLoop();
 
-    ImGui_ImplOpenGL2_Shutdown();
-    ImGui_ImplGLUT_Shutdown();
+    if (dataSetToProcess.has_value())
+    {
+        std::vector<std::string> files;
+        for (const auto & entry : fs::directory_iterator(*dataSetToProcess))
+        {
+            if (entry.is_regular_file() && (entry.path().extension() == ".laz" ||entry.path().extension() == ".las"))
+            {
+                files.push_back(entry.path().string());
+            }
+        }
 
-    ImGui::DestroyContext();
+        const bool isLoadOk = LoadData(files);
+        if (isLoadOk)
+        {
+            std::cout << "LoadData complete" << std::endl;
+        }
+        IcpButton();
+
+    }
+
+    if (gui)
+    {
+        initGL(&argc, argv);
+        glutDisplayFunc(display);
+        glutMouseFunc(mouse);
+        glutMotionFunc(motion);
+        glutMouseWheelFunc(wheel);
+        glutMainLoop();
+
+        ImGui_ImplOpenGL2_Shutdown();
+        ImGui_ImplGLUT_Shutdown();
+
+        ImGui::DestroyContext();
+    }
+    else
+    {
+        while (globals::icpRunning){
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::cout << "ICP in progress : " << 100.0 *globals::icpProgress << " % "<< std::endl;
+        }
+        if (dataSetToProcess.has_value())
+        {
+            SaveSession(resultName.value_or("lidar_odometry_result_kiss_0"));
+        }
+    }
+
     return 0;
 }

@@ -119,12 +119,12 @@ bool saveLaz(const std::string &filename, const std::vector<Point3Di> &points_gl
 
     constexpr float scale = 0.0001f; // one tenth of milimeter
     // find max
-    double max_x{std::numeric_limits<double>::lowest()};
-    double max_y{std::numeric_limits<double>::lowest()};
-    double max_z{std::numeric_limits<double>::lowest()};
-    double min_x = 1000000000000.0;
-    double min_y = 1000000000000.0;
-    double min_z = 1000000000000.0;
+    double max_x{ std::numeric_limits<double>::lowest() };
+    double max_y{ std::numeric_limits<double>::lowest() };
+    double max_z{ std::numeric_limits<double>::lowest() };
+    double min_x{ std::numeric_limits<double>::max() };
+    double min_y{ std::numeric_limits<double>::max() };
+    double min_z{ std::numeric_limits<double>::max() };
 
     for (auto &p : points_global)
     {
