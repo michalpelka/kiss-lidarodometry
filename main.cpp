@@ -258,7 +258,7 @@ bool LoadData(std::vector<std::string> input_file_names)
             fnSn.replace_extension(".sn");
 
             // GetId of Imu to use
-            const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn);
+            const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
             // GetId of Imu to use
             int imuNumberToUse = MLvxCalib::GetImuIdToUse(idToSn, imuSnToUse);
             std::cout << "imuNumberToUse  " << imuNumberToUse << " at: '" << imufn << "'" << std::endl;
