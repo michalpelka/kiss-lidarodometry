@@ -1,6 +1,9 @@
 #include "lidar_odometry_utils.h"
 #include <filesystem>
 #include <nlohmann/json.hpp>
+#include "csv.hpp"
+#include "Fusion/Fusion.h"
+
 // this function provides unique index
 unsigned long long int get_index(const int16_t x, const int16_t y, const int16_t z)
 {
@@ -448,6 +451,110 @@ std::vector<Point3Di> load_point_cloud(const std::string &lazFile, bool ommit_po
     std::cout << "total number points: " << points.size() << std::endl;
     laszip_close_reader(laszip_reader);
     return points;
+}
+
+std::vector<std::tuple<std::pair<double, double>, FusionVector, FusionVector>> load_imu(const std::string &imu_file, int imuToUse)
+{
+    std::vector<std::tuple<std::pair<double, double>, FusionVector, FusionVector>> all_data;
+
+    csv::CSVFormat format;
+    format.delimiter({' ', ',', '\t'});
+
+    csv::CSVReader reader(imu_file, format);
+    const auto columns = reader.get_col_names();
+    const std::set<std::string> columnsSet(columns.begin(), columns.end());
+
+    // mandatory columns
+    const bool hasTsColumn = columnsSet.contains("timestamp");
+    const bool hasGyrosColumns = columnsSet.contains("gyroX") && columnsSet.contains("gyroY") && columnsSet.contains("gyroZ");
+    const bool hasAccsColumns = columnsSet.contains("accX") && columnsSet.contains("accY") && columnsSet.contains("accZ");
+
+    // optional
+    const bool hasImuIdColumn = columnsSet.contains("imuId");
+    const bool hasUnixTimestampColumn = columnsSet.contains("timestampUnix");
+
+    // check if legacy
+    bool is_legacy = true;
+    if (hasTsColumn)
+    {
+        is_legacy = false;
+        if (!hasAccsColumns && !hasGyrosColumns)
+        {
+            std::cerr << "Input csv file is missing one of the mandatory columns :\n";
+            std::cerr << "timestamp,gyroX,gyroY,gyroZ,accX,accY,accZ";
+            return all_data;
+        }
+    }
+
+    if (!is_legacy)
+    {
+        // check if all needed columns are in csv
+        for (auto row : reader)
+        {
+            int imu_id = -1;
+            if (hasImuIdColumn)
+            {
+                imu_id = row["imuId"].get<int>();
+            }
+            if (imu_id < 0 || imuToUse == imu_id)
+            {
+                double timestamp = row["timestamp"].get<double>();
+                double timestampUnix = row["timestampUnix"].get<double>();
+                FusionVector gyr;
+                gyr.axis.x = row["gyroX"].get<double>();
+                gyr.axis.y = row["gyroY"].get<double>();
+                gyr.axis.z = row["gyroZ"].get<double>();
+                FusionVector acc;
+                acc.axis.x = row["accX"].get<double>();
+                acc.axis.y = row["accY"].get<double>();
+                acc.axis.z = row["accZ"].get<double>();
+                all_data.emplace_back(std::pair(timestamp / 1e9, timestampUnix / 1e9), gyr, acc);
+                //std::cout << "acc.axis.x: " << acc.axis.x << " acc.axis.y: " << acc.axis.y << " acc.axis.z " << acc.axis.z << " imu_id: " << imu_id << std::endl;
+            }
+        }
+    }
+    if (is_legacy)
+    {
+        std::ifstream myfile(imu_file);
+        if (myfile.is_open())
+        {
+            while (myfile)
+            {
+                double data[7];
+                double timestampUnix = 0.0;
+                int imuId = 0;
+                std::string line;
+                std::getline(myfile, line);
+                std::istringstream iss(line);
+                iss >> data[0] >> data[1] >> data[2] >> data[3] >> data[4] >> data[5] >> data[6];
+                if (!iss.eof())
+                {
+                    iss >> imuId;
+                }
+                if (!iss.eof())
+                {
+                    iss >> timestampUnix;
+                }
+                // std::cout << data[0] << " " << data[1] << " " << data[2] << " " << data[3] << " " << data[4] << " " << data[5] << " " << data[6] << std::endl;
+                if (data[0] > 0 && imuId == imuToUse)
+                {
+                    FusionVector gyr;
+                    gyr.axis.x = data[1];
+                    gyr.axis.y = data[2];
+                    gyr.axis.z = data[3];
+
+                    FusionVector acc;
+                    acc.axis.x = data[4];
+                    acc.axis.y = data[5];
+                    acc.axis.z = data[6];
+
+                    all_data.emplace_back(std::pair(data[0] / 1e9, timestampUnix / 1e9), gyr, acc);
+                }
+            }
+            myfile.close();
+        }
+    }
+    return all_data;
 }
 
 std::unordered_map<int, std::string> MLvxCalib::GetIdToSnMapping(const std::string& filename)

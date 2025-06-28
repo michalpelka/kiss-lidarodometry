@@ -14,8 +14,10 @@
 #include <fstream>
 #include <iostream>
 
-
+#include <Fusion/FusionAhrs.h>
 #include <nlohmann/json.hpp>
+#include "nmeaParser.h"
+#include "Params.h"
 namespace fs = std::filesystem;
 
 struct TrajectoryNode
@@ -58,6 +60,24 @@ void SaveTrj(const std::string& pathtrj, const std::vector<TrajectoryNode>& traj
     outfile.close();
 }
 
+std::vector<Point3Di> CreateMetascan(const std::vector<RegisteredFrame>& frames)
+{
+    std::vector<Point3Di> result;
+    for (const auto& currentOriginalFrame : frames)
+    {
+        for (size_t i = 0; i < currentOriginalFrame.points.size(); ++i)
+        {
+           const auto& originalPoint = currentOriginalFrame.points[i];
+           const auto transformedPoint = currentOriginalFrame.pose * originalPoint;
+            Point3Di p;
+            p.point = transformedPoint;
+            p.timestamp = currentOriginalFrame.timestamps_offset[i];
+            p.intensity = currentOriginalFrame.intensities[i];;
+            result.push_back(p);
+        }
+    }
+    return result;
+}
 std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame>& frames, int maxNumberOfPoints = 200000)
 {
     std::vector<RegisteredFrame> result;
@@ -120,13 +140,7 @@ namespace globals
     bool gui_mouse_down{ false };
     float mouse_sensitivity = 1.0;
 
-    struct
-    {
-        double filter_threshold_xy = 0.0;
-        double timestamp_per_icp = 0.05;
-        kiss_icp::pipeline::KISSConfig icp_config;
-        int decimation = 10;
-    } params;
+    Params::Params params;
 
     std::mutex mtx;
     std::vector<RegisteredFrame> registeredFrames;
@@ -134,66 +148,21 @@ namespace globals
     std::vector<Eigen::Vector3d> localMap;
     std::thread icpThread;
     std::atomic<bool> icpRunning{ false };
+    std::atomic<float> currentGnssSpeed { 0.0 };
     std::atomic<float> icpProgress{ 0.0 };
+    std::map<double, Eigen::Matrix4d> imuTrajectory;
+    std::map<double, float> gnssSpeed;
+
 } // namespace globals
 
-nlohmann::json ParamsToJson()
-{
-    nlohmann::json j;
-    j["filter_threshold_xy"] = globals::params.filter_threshold_xy;
-    j["timestamp_per_icp"] = globals::params.timestamp_per_icp;
-    j["decimation"] =  globals::params.decimation;
-    j["icp_config"]["voxel_size"] = globals::params.icp_config.voxel_size;
-    j["icp_config"]["max_range"] = globals::params.icp_config.max_range;
-    j["icp_config"]["min_range"] = globals::params.icp_config.min_range;
-    j["icp_config"]["max_points_per_voxel"] = globals::params.icp_config.max_points_per_voxel;
-    j["icp_config"]["min_motion_th"] = globals::params.icp_config.min_motion_th;
-    j["icp_config"]["initial_threshold"] = globals::params.icp_config.initial_threshold;
-    j["icp_config"]["max_num_iterations"] = globals::params.icp_config.max_num_iterations;
-    j["icp_config"]["convergence_criterion"] = globals::params.icp_config.convergence_criterion;
-    j["icp_config"]["max_num_threads"] = globals::params.icp_config.max_num_threads;
-    j["icp_config"]["deskew"] = globals::params.icp_config.deskew;
-    return j;
-}
 
-void LoadParamFromJson(const nlohmann::json &j)
+bool LoadData(std::vector<std::string> input_file_names)
 {
-    globals::params.filter_threshold_xy = j["filter_threshold_xy"];
-    globals::params.timestamp_per_icp = j["timestamp_per_icp"];
-    globals::params.decimation = j["decimation"];
-    globals::params.icp_config.voxel_size = j["icp_config"]["voxel_size"];
-    globals::params.icp_config.max_range = j["icp_config"]["max_range"];
-    globals::params.icp_config.min_range = j["icp_config"]["min_range"];
-    globals::params.icp_config.max_points_per_voxel = j["icp_config"]["max_points_per_voxel"];
-    globals::params.icp_config.min_motion_th = j["icp_config"]["min_motion_th"];
-    globals::params.icp_config.initial_threshold = j["icp_config"]["initial_threshold"];
-    globals::params.icp_config.max_num_iterations = j["icp_config"]["max_num_iterations"];
-    globals::params.icp_config.convergence_criterion = j["icp_config"]["convergence_criterion"];
-    globals::params.icp_config.max_num_threads = j["icp_config"]["max_num_threads"];
-    globals::params.icp_config.deskew = j["icp_config"]["deskew"];
-}
-
-void LoadDataButton()
-{
-    static std::shared_ptr<pfd::open_file> open_file;
-    std::vector<std::string> input_file_names;
-    ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)open_file);
-    const auto t = [&]()
-    {
-        std::vector<std::string> filters;
-        auto sel = pfd::open_file("Load las files", "C:\\", filters, true).result();
-        for (int i = 0; i < sel.size(); i++)
-        {
-            input_file_names.push_back(sel[i]);
-        }
-    };
-    std::thread t1(t);
-    t1.join();
-
     std::sort(std::begin(input_file_names), std::end(input_file_names));
 
     std::vector<std::string> laz_files;
-
+    std::vector<std::string> csv_files;
+    std::vector<std::string> nmea_files;
     std::for_each(
         std::begin(input_file_names),
         std::end(input_file_names),
@@ -202,6 +171,14 @@ void LoadDataButton()
             if (fileName.ends_with(".laz") || fileName.ends_with(".las"))
             {
                 laz_files.push_back(fileName);
+            }
+            else if (fileName.ends_with(".csv"))
+            {
+                csv_files.push_back(fileName);
+            }
+            else if (fileName.ends_with(".nmea"))
+            {
+                nmea_files.push_back(fileName);
             }
         });
 
@@ -220,6 +197,16 @@ void LoadDataButton()
             fs::create_directory(wdp);
         }
         globals::pointsPerFile.resize(laz_files.size());
+
+        // nmea
+        for (const auto& nmeaFile : nmea_files)
+        {
+            auto speeds = mandeye::GetSpeedFromNMEA(nmeaFile);
+            for (const auto& [timestamp, speed] : speeds)
+            {
+                globals::gnssSpeed[timestamp] = speed;
+            }
+        }
 
         std::transform(
             std::execution::par_unseq,
@@ -260,13 +247,108 @@ void LoadDataButton()
                 //
             });
         std::cout << "std::transform finished" << std::endl;
+
+        // load IMU data
+        std::vector<std::tuple<std::pair<double, double>, FusionVector, FusionVector>> imu_data;
+
+        for (size_t fileNo = 0; fileNo < csv_files.size(); fileNo++)
+        {
+            const std::string &imufn = csv_files.at(fileNo);
+            fs::path fnSn(imufn);
+            fnSn.replace_extension(".sn");
+
+            // GetId of Imu to use
+            const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
+            // GetId of Imu to use
+            int imuNumberToUse = MLvxCalib::GetImuIdToUse(idToSn, imuSnToUse);
+            std::cout << "imuNumberToUse  " << imuNumberToUse << " at: '" << imufn << "'" << std::endl;
+            auto imu = load_imu(imufn.c_str(), imuNumberToUse);
+            std::cout << imufn << " with mapping " << fnSn << std::endl;
+            imu_data.insert(std::end(imu_data), std::begin(imu), std::end(imu));
+        }
+        std::sort(
+            imu_data.begin(),
+            imu_data.end(),
+            [](const std::tuple<std::pair<double, double>, FusionVector, FusionVector>& a,
+               const std::tuple<std::pair<double, double>, FusionVector, FusionVector>& b)
+            {
+                return std::get<0>(a).first < std::get<0>(b).first;
+            });
+
+        FusionAhrs ahrs;
+        FusionAhrsInitialise(&ahrs);
+
+
+        int counter =0;
+        for (const auto &[timestamp_pair, gyr, acc] : imu_data)
+        {
+            const FusionVector gyroscope = {static_cast<float>(gyr.axis.x * 180.0 / M_PI), static_cast<float>(gyr.axis.y * 180.0 / M_PI), static_cast<float>(gyr.axis.z * 180.0 / M_PI)};
+            // const FusionVector gyroscope = {static_cast<float>(gyr.axis.x), static_cast<float>(gyr.axis.y), static_cast<float>(gyr.axis.z)};
+            const FusionVector accelerometer = {acc.axis.x, acc.axis.y, acc.axis.z};
+            static bool first = true;
+
+            static double last_ts;
+            if (first)
+            {
+                FusionAhrsUpdateNoMagnetometer(&ahrs, gyroscope, accelerometer, 1/200.0); // initial update with 100ms
+                first = false;
+                // last_ts = timestamp_pair.first;
+            }
+            else
+            {
+                double curr_ts = timestamp_pair.first;
+
+                double ts_diff = curr_ts - last_ts;
+
+                FusionAhrsUpdateNoMagnetometer(&ahrs, gyroscope, accelerometer, ts_diff);
+            }
+
+            last_ts = timestamp_pair.first;
+            //
+
+            FusionQuaternion quat = FusionAhrsGetQuaternion(&ahrs);
+
+            Eigen::Quaterniond d{quat.element.w, quat.element.x, quat.element.y, quat.element.z};
+            Eigen::Affine3d t{Eigen::Matrix4d::Identity()};
+            t.rotate(d);
+
+            globals::imuTrajectory[timestamp_pair.first] = t.matrix();
+        }
+
+
+
+        return true;
+
+
     }
-    else
+
+    return false;
+}
+
+void LoadDataButton()
+{
+    static std::shared_ptr<pfd::open_file> open_file;
+    std::vector<std::string> input_file_names;
+    ImGui::PushItemFlag(ImGuiItemFlags_Disabled, (bool)open_file);
+    const auto t = [&]()
+    {
+        std::vector<std::string> filters;
+        auto sel = pfd::open_file("Load las files", "C:\\", filters, true).result();
+        for (int i = 0; i < sel.size(); i++)
+        {
+            input_file_names.push_back(sel[i]);
+        }
+    };
+    std::thread t1(t);
+    t1.join();
+
+    if (!LoadData(input_file_names))
     {
         pfd::message("Error", "please select files correctly", pfd::choice::ok);
         std::cout << "please select files correctly" << std::endl;
     }
 }
+
 
 void IcpButton()
 {
@@ -274,12 +356,12 @@ void IcpButton()
     {
         return;
     }
-
+    globals::icpRunning.store(true);
     std::thread icpThread(
         []()
         {
             const auto startTime = std::chrono::high_resolution_clock::now();
-            globals::icpRunning.store(true);
+
             using namespace kiss_icp::pipeline;
             KissICP icp(globals::params.icp_config);
             {
@@ -314,11 +396,66 @@ void IcpButton()
                     }
                 }
             }
+            Eigen::Affine3d lastTrajectory = Eigen::Affine3d::Identity();
 
+            std::ofstream gnssSpeeds;
+            gnssSpeeds.open("gnss_speeds.csv");
+           // gnssSpeeds << "timestamp,speed" << std::endl;
+            for (auto & [timestamp, speed] : globals::gnssSpeed)
+            {
+                gnssSpeeds << std::setprecision(20) <<  double(timestamp) << "," << speed * globals::params.timestamp_per_icp << std::endl;
+            }
+            std::ofstream rotationICP;
+            rotationICP.open("rotation_icp.csv");
+            //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
+            std::ofstream rotationIMU;
+            rotationIMU.open("rotation_imu.csv");
+            //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
+
+            const static Eigen::IOFormat CSVFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n");
             for (size_t i = 0; i < globals::registeredFrames.size(); ++i)
             {
                 auto& frame = globals::registeredFrames[i];
+                // query imu trajectory
+
+
+                const double query_time1 = frame.timestamp_hardware.back();
+                const double query_time2 = frame.timestamp_hardware.front();
+                const Eigen::Affine3d imuPose1 {getInterpolatedPose(globals::imuTrajectory, query_time1)};
+                const Eigen::Affine3d imuPose2 {getInterpolatedPose(globals::imuTrajectory, query_time2)};
+                const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
+                auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
+                imuUpdate = imuUpdate.inverse();
+                if (globals::params.useImu)
+                {
+                    icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
+                }
+                if (globals::params.useGNSSSpeed)
+                {
+                    // get speed at query_time2
+                    auto it = std::lower_bound(globals::gnssSpeed.begin(), globals::gnssSpeed.end(), query_time2,
+                        [](const auto& pair, double time) { return pair.first < time; });
+
+                    if ( it != globals::gnssSpeed.end())
+                    {
+                        const double gnssSpeed = it->second;
+
+                        globals::currentGnssSpeed.store(gnssSpeed);
+                        if (gnssSpeed > globals::params.minGNSSSpeed)
+                        {
+                            auto tangent = icp.delta().log();
+                            tangent[0] = it->second  * globals::params.timestamp_per_icp;
+                            icp.delta() = Sophus::SE3d::exp(tangent);
+                        }
+                    }
+
+                }
+                rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.log().transpose().format(CSVFormat)<< std::endl;
+
                 auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
+
+                rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
+
                 std::unique_lock lck(globals::mtx);
                 frame.pose = Eigen::Affine3d(icp.pose().matrix());
                 globals::localMap = icp.LocalMap();
@@ -333,9 +470,20 @@ void IcpButton()
     icpThread.detach();
 }
 
-void SaveSession()
+void SaveMetascan(const std::string& metcanPath)
 {
-    const fs::path resultDir = fs::path(globals::working_directory) / "lidar_odometry_result_kiss_0";
+    std::cout << "Saving metascan to: " << metcanPath << std::endl;
+    auto metascan = CreateMetascan(globals::registeredFrames);
+    const fs::path lazFilename = metcanPath;
+    saveLaz(lazFilename.string(), metascan);
+}
+
+
+
+void SaveSession(const std::string& resultName = "lidar_odometry_result_kiss_0")
+{
+    const fs::path resultDir = fs::path(globals::working_directory) / resultName;
+    std::cout << "Saving session to: " << resultDir << std::endl;
     fs::create_directory(resultDir);
     std::vector<Eigen::Affine3d> poses;
     std::vector<std::string> lioLazFiles;
@@ -417,16 +565,21 @@ void lidar_odometry_gui()
         {
             SaveSession();
         }
+        if (ImGui::Button("save metascan"))
+        {
+            SaveMetascan("metascan.laz");
+        }
         if (globals::icpRunning)
         {
             ImGui::ProgressBar(globals::icpProgress);
+            ImGui::Text("Speed from GNSS: %.2f m/s (%.2f km/h)", globals::currentGnssSpeed.load(), globals::currentGnssSpeed.load() * 3.6);
         }
 
         ImGui::Separator();
         ImGui::Text("Parameters");
         ImGui::InputDouble("filter_threshold_xy", &globals::params.filter_threshold_xy);
         ImGui::InputDouble("timestamp_per_icp", &globals::params.timestamp_per_icp);
-        ImGui::InputInt("decimation", &globals::params.decimation);
+        //ImGui::InputInt("decimation", &globals::params.decimation);
         ImGui::Separator();
         ImGui::Text("ICP Parameters");
         ImGui::InputDouble("voxel_size", &globals::params.icp_config.voxel_size);
@@ -439,10 +592,21 @@ void lidar_odometry_gui()
         ImGui::InputDouble("convergence_criterion", &globals::params.icp_config.convergence_criterion);
         ImGui::InputInt("max_num_threads", &globals::params.icp_config.max_num_threads);
         ImGui::Checkbox("deskew", &globals::params.icp_config.deskew);
+        ImGui::Checkbox("use imu", &globals::params.useImu);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("If checked, IMU data will be used for initial guess. ");
+        ImGui::Checkbox("use GNSS speed", &globals::params.useGNSSSpeed);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("If checked, GNSS speed will be used for guess. ");
+        ImGui::InputFloat("minimum GNSS speed (m/s)", &globals::params.minGNSSSpeed);
+        ImGui::SameLine();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Mimimum GNSS speed to use for guess. ");
+
         if (ImGui::Button("saveParams"))
         {
             std::ofstream files("params.json");
-            auto j = ParamsToJson();
+            auto j = Params::ParamsToJson(globals::params);
             files << j.dump(10);
         }
     }
@@ -649,33 +813,104 @@ bool initGL(int* argc, char** argv)
 
 int main(int argc, char* argv[])
 {
-    std::string configFn;
-
+    std::optional<std::string> configFn;
+    std::optional<std::string> dataSetToProcess;
+    std::optional<std::string> resultName;
+    std::optional<std::string> metaScanPath;
+    bool gui = true;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
             configFn = argv[i + 1];
             break;
         }
+        if (arg == "--nogui")
+        {
+            gui = false;
+        }
+        if (arg == "--process" && i + 1 < argc)
+        {
+            dataSetToProcess = argv[i + 1];
+        }
+        if (arg == "--metascan" && i + 1 < argc)
+        {
+            metaScanPath = argv[i + 1];
+        }
+        if (arg == "--resultName" && i + 1 < argc)
+        {
+            resultName = argv[i + 1];
+        }
     }
-    if (!configFn.empty())
+
+    if (configFn.has_value())
     {
         // load json
-        std::ifstream file(configFn);
+        std::ifstream file(*configFn);
         using json = nlohmann::json;
         json jsonData = json::parse(file);
-        LoadParamFromJson(jsonData);
+        globals::params = Params::LoadParamFromJson(jsonData, globals::params);
     }
-    initGL(&argc, argv);
-    glutDisplayFunc(display);
-    glutMouseFunc(mouse);
-    glutMotionFunc(motion);
-    glutMouseWheelFunc(wheel);
-    glutMainLoop();
+    else
+    {
+        std::ifstream file("params.json");;
+        if (file.is_open())
+        {
+            using json = nlohmann::json;
+            json jsonData = json::parse(file);
+            globals::params = Params::LoadParamFromJson(jsonData, globals::params);
+        }
+    }
 
-    ImGui_ImplOpenGL2_Shutdown();
-    ImGui_ImplGLUT_Shutdown();
+    if (dataSetToProcess.has_value())
+    {
+        std::vector<std::string> files;
+        for (const auto & entry : fs::directory_iterator(*dataSetToProcess))
+        {
+            if (entry.is_regular_file())
+            {
+                files.push_back(entry.path().string());
+            }
+        }
 
-    ImGui::DestroyContext();
+        const bool isLoadOk = LoadData(files);
+        if (isLoadOk)
+        {
+            std::cout << "LoadData complete" << std::endl;
+        }
+        IcpButton();
+
+
+    }
+
+    if (gui)
+    {
+        initGL(&argc, argv);
+        glutDisplayFunc(display);
+        glutMouseFunc(mouse);
+        glutMotionFunc(motion);
+        glutMouseWheelFunc(wheel);
+        glutMainLoop();
+
+        ImGui_ImplOpenGL2_Shutdown();
+        ImGui_ImplGLUT_Shutdown();
+
+        ImGui::DestroyContext();
+    }
+    else
+    {
+        while (globals::icpRunning){
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::cout << "ICP in progress : " << 100.0 *globals::icpProgress << " % "<< std::endl;
+        }
+        if (dataSetToProcess.has_value())
+        {
+            SaveSession(resultName.value_or("lidar_odometry_result_kiss_0"));
+        }
+        if (metaScanPath.has_value())
+        {
+            SaveMetascan(*metaScanPath);
+        }
+    }
+
     return 0;
 }
