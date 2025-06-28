@@ -16,6 +16,8 @@
 
 #include <Fusion/FusionAhrs.h>
 #include <nlohmann/json.hpp>
+#include "nmeaParser.h"
+#include "Params.h"
 namespace fs = std::filesystem;
 
 struct TrajectoryNode
@@ -138,14 +140,7 @@ namespace globals
     bool gui_mouse_down{ false };
     float mouse_sensitivity = 1.0;
 
-    struct
-    {
-        double filter_threshold_xy = 0.0;
-        double timestamp_per_icp = 0.05;
-        kiss_icp::pipeline::KISSConfig icp_config;
-        int decimation = 10;
-        bool useImu = true;
-    } params;
+    Params::Params params;
 
     std::mutex mtx;
     std::vector<RegisteredFrame> registeredFrames;
@@ -153,47 +148,13 @@ namespace globals
     std::vector<Eigen::Vector3d> localMap;
     std::thread icpThread;
     std::atomic<bool> icpRunning{ false };
+    std::atomic<float> currentGnssSpeed { 0.0 };
     std::atomic<float> icpProgress{ 0.0 };
     std::map<double, Eigen::Matrix4d> imuTrajectory;
+    std::map<double, float> gnssSpeed;
+
 } // namespace globals
 
-nlohmann::json ParamsToJson()
-{
-    nlohmann::json j;
-    j["filter_threshold_xy"] = globals::params.filter_threshold_xy;
-    j["timestamp_per_icp"] = globals::params.timestamp_per_icp;
-    j["decimation"] =  globals::params.decimation;
-    j["icp_config"]["voxel_size"] = globals::params.icp_config.voxel_size;
-    j["icp_config"]["max_range"] = globals::params.icp_config.max_range;
-    j["icp_config"]["min_range"] = globals::params.icp_config.min_range;
-    j["icp_config"]["max_points_per_voxel"] = globals::params.icp_config.max_points_per_voxel;
-    j["icp_config"]["min_motion_th"] = globals::params.icp_config.min_motion_th;
-    j["icp_config"]["initial_threshold"] = globals::params.icp_config.initial_threshold;
-    j["icp_config"]["max_num_iterations"] = globals::params.icp_config.max_num_iterations;
-    j["icp_config"]["convergence_criterion"] = globals::params.icp_config.convergence_criterion;
-    j["icp_config"]["max_num_threads"] = globals::params.icp_config.max_num_threads;
-    j["icp_config"]["deskew"] = globals::params.icp_config.deskew;
-    j["useImu"] = globals::params.useImu;
-    return j;
-}
-
-void LoadParamFromJson(const nlohmann::json &j)
-{
-    globals::params.filter_threshold_xy = j["filter_threshold_xy"];
-    globals::params.timestamp_per_icp = j["timestamp_per_icp"];
-    globals::params.decimation = j["decimation"];
-    globals::params.icp_config.voxel_size = j["icp_config"]["voxel_size"];
-    globals::params.icp_config.max_range = j["icp_config"]["max_range"];
-    globals::params.icp_config.min_range = j["icp_config"]["min_range"];
-    globals::params.icp_config.max_points_per_voxel = j["icp_config"]["max_points_per_voxel"];
-    globals::params.icp_config.min_motion_th = j["icp_config"]["min_motion_th"];
-    globals::params.icp_config.initial_threshold = j["icp_config"]["initial_threshold"];
-    globals::params.icp_config.max_num_iterations = j["icp_config"]["max_num_iterations"];
-    globals::params.icp_config.convergence_criterion = j["icp_config"]["convergence_criterion"];
-    globals::params.icp_config.max_num_threads = j["icp_config"]["max_num_threads"];
-    globals::params.icp_config.deskew = j["icp_config"]["deskew"];
-    globals::params.useImu = j["useImu"];
-}
 
 bool LoadData(std::vector<std::string> input_file_names)
 {
@@ -201,6 +162,7 @@ bool LoadData(std::vector<std::string> input_file_names)
 
     std::vector<std::string> laz_files;
     std::vector<std::string> csv_files;
+    std::vector<std::string> nmea_files;
     std::for_each(
         std::begin(input_file_names),
         std::end(input_file_names),
@@ -210,9 +172,13 @@ bool LoadData(std::vector<std::string> input_file_names)
             {
                 laz_files.push_back(fileName);
             }
-            if (fileName.ends_with(".csv"))
+            else if (fileName.ends_with(".csv"))
             {
                 csv_files.push_back(fileName);
+            }
+            else if (fileName.ends_with(".nmea"))
+            {
+                nmea_files.push_back(fileName);
             }
         });
 
@@ -231,6 +197,16 @@ bool LoadData(std::vector<std::string> input_file_names)
             fs::create_directory(wdp);
         }
         globals::pointsPerFile.resize(laz_files.size());
+
+        // nmea
+        for (const auto& nmeaFile : nmea_files)
+        {
+            auto speeds = mandeye::GetSpeedFromNMEA(nmeaFile);
+            for (const auto& [timestamp, speed] : speeds)
+            {
+                globals::gnssSpeed[timestamp] = speed;
+            }
+        }
 
         std::transform(
             std::execution::par_unseq,
@@ -290,11 +266,14 @@ bool LoadData(std::vector<std::string> input_file_names)
             std::cout << imufn << " with mapping " << fnSn << std::endl;
             imu_data.insert(std::end(imu_data), std::begin(imu), std::end(imu));
         }
-        std::sort(imu_data.begin(), imu_data.end(),
-                   [](const std::tuple<std::pair<double, double>, FusionVector, FusionVector> &a, const std::tuple<std::pair<double, double>, FusionVector, FusionVector> &b)
-                   {
-                       return std::get<0>(a).first < std::get<0>(b).first;
-                   });
+        std::sort(
+            imu_data.begin(),
+            imu_data.end(),
+            [](const std::tuple<std::pair<double, double>, FusionVector, FusionVector>& a,
+               const std::tuple<std::pair<double, double>, FusionVector, FusionVector>& b)
+            {
+                return std::get<0>(a).first < std::get<0>(b).first;
+            });
 
         FusionAhrs ahrs;
         FusionAhrsInitialise(&ahrs);
@@ -335,6 +314,8 @@ bool LoadData(std::vector<std::string> input_file_names)
 
             globals::imuTrajectory[timestamp_pair.first] = t.matrix();
         }
+
+
 
         return true;
 
@@ -417,31 +398,63 @@ void IcpButton()
             }
             Eigen::Affine3d lastTrajectory = Eigen::Affine3d::Identity();
 
-            // std::ofstream rotationICP;
-            // rotationICP.open("rotation_icp.csv");
-            // std::ofstream rotationIMU;
-            // rotationIMU.open("rotation_imu.csv");
+            std::ofstream gnssSpeeds;
+            gnssSpeeds.open("gnss_speeds.csv");
+           // gnssSpeeds << "timestamp,speed" << std::endl;
+            for (auto & [timestamp, speed] : globals::gnssSpeed)
+            {
+                gnssSpeeds << std::setprecision(20) <<  double(timestamp) << "," << speed * globals::params.timestamp_per_icp << std::endl;
+            }
+            std::ofstream rotationICP;
+            rotationICP.open("rotation_icp.csv");
+            //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
+            std::ofstream rotationIMU;
+            rotationIMU.open("rotation_imu.csv");
+            //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
+
             const static Eigen::IOFormat CSVFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n");
             for (size_t i = 0; i < globals::registeredFrames.size(); ++i)
             {
                 auto& frame = globals::registeredFrames[i];
                 // query imu trajectory
+
+
+                const double query_time1 = frame.timestamp_hardware.back();
+                const double query_time2 = frame.timestamp_hardware.front();
+                const Eigen::Affine3d imuPose1 {getInterpolatedPose(globals::imuTrajectory, query_time1)};
+                const Eigen::Affine3d imuPose2 {getInterpolatedPose(globals::imuTrajectory, query_time2)};
+                const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
+                auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
+                imuUpdate = imuUpdate.inverse();
                 if (globals::params.useImu)
                 {
-                    const double query_time1 = frame.timestamp_hardware.back();
-                    const double query_time2 = frame.timestamp_hardware.front();
-                    const Eigen::Affine3d imuPose1 {getInterpolatedPose(globals::imuTrajectory, query_time1)};
-                    const Eigen::Affine3d imuPose2 {getInterpolatedPose(globals::imuTrajectory, query_time2)};
-                    const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
-                    auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
-                    imuUpdate = imuUpdate.inverse();
-                    icp.delta() = imuUpdate;
-                    //rotationIMU << imuUpdate.log().transpose().format(CSVFormat) << std::endl;
-                    // icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
-                    // std::cout << "imu pose at " << query_time1 << " is: " << icp.delta().vee().transpose()<< std::endl;
+                    icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
                 }
+                if (globals::params.useGNSSSpeed)
+                {
+                    // get speed at query_time2
+                    auto it = std::lower_bound(globals::gnssSpeed.begin(), globals::gnssSpeed.end(), query_time2,
+                        [](const auto& pair, double time) { return pair.first < time; });
+
+                    if ( it != globals::gnssSpeed.end())
+                    {
+                        const double gnssSpeed = it->second;
+
+                        globals::currentGnssSpeed.store(gnssSpeed);
+                        if (gnssSpeed > globals::params.minGNSSSpeed)
+                        {
+                            auto tangent = icp.delta().log();
+                            tangent[0] = it->second  * globals::params.timestamp_per_icp;
+                            icp.delta() = Sophus::SE3d::exp(tangent);
+                        }
+                    }
+
+                }
+                rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.log().transpose().format(CSVFormat)<< std::endl;
 
                 auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
+
+                rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
 
                 std::unique_lock lck(globals::mtx);
                 frame.pose = Eigen::Affine3d(icp.pose().matrix());
@@ -559,13 +572,14 @@ void lidar_odometry_gui()
         if (globals::icpRunning)
         {
             ImGui::ProgressBar(globals::icpProgress);
+            ImGui::Text("Speed from GNSS: %.2f m/s (%.2f km/h)", globals::currentGnssSpeed.load(), globals::currentGnssSpeed.load() * 3.6);
         }
 
         ImGui::Separator();
         ImGui::Text("Parameters");
         ImGui::InputDouble("filter_threshold_xy", &globals::params.filter_threshold_xy);
         ImGui::InputDouble("timestamp_per_icp", &globals::params.timestamp_per_icp);
-        ImGui::InputInt("decimation", &globals::params.decimation);
+        //ImGui::InputInt("decimation", &globals::params.decimation);
         ImGui::Separator();
         ImGui::Text("ICP Parameters");
         ImGui::InputDouble("voxel_size", &globals::params.icp_config.voxel_size);
@@ -579,10 +593,20 @@ void lidar_odometry_gui()
         ImGui::InputInt("max_num_threads", &globals::params.icp_config.max_num_threads);
         ImGui::Checkbox("deskew", &globals::params.icp_config.deskew);
         ImGui::Checkbox("use imu", &globals::params.useImu);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("If checked, IMU data will be used for initial guess. ");
+        ImGui::Checkbox("use GNSS speed", &globals::params.useGNSSSpeed);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("If checked, GNSS speed will be used for guess. ");
+        ImGui::InputFloat("minimum GNSS speed (m/s)", &globals::params.minGNSSSpeed);
+        ImGui::SameLine();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Mimimum GNSS speed to use for guess. ");
+
         if (ImGui::Button("saveParams"))
         {
             std::ofstream files("params.json");
-            auto j = ParamsToJson();
+            auto j = Params::ParamsToJson(globals::params);
             files << j.dump(10);
         }
     }
@@ -824,7 +848,7 @@ int main(int argc, char* argv[])
         std::ifstream file(*configFn);
         using json = nlohmann::json;
         json jsonData = json::parse(file);
-        LoadParamFromJson(jsonData);
+        globals::params = Params::LoadParamFromJson(jsonData, globals::params);
     }
     else
     {
@@ -833,7 +857,7 @@ int main(int argc, char* argv[])
         {
             using json = nlohmann::json;
             json jsonData = json::parse(file);
-            LoadParamFromJson(jsonData);
+            globals::params = Params::LoadParamFromJson(jsonData, globals::params);
         }
     }
 
@@ -842,7 +866,7 @@ int main(int argc, char* argv[])
         std::vector<std::string> files;
         for (const auto & entry : fs::directory_iterator(*dataSetToProcess))
         {
-            if (entry.is_regular_file() && (entry.path().extension() == ".laz" ||entry.path().extension() == ".las") || entry.path().extension() == ".csv" || entry.path().extension() == ".sn")
+            if (entry.is_regular_file())
             {
                 files.push_back(entry.path().string());
             }

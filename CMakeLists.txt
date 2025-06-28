@@ -48,7 +48,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/kiss-icp/cpp/kiss_icp ${CM
 message("LASzip library")
 
 
-add_executable(kiss_icp_lidar_odometry main.cpp  lidar_odometry_utils.cpp ${IMGUI_SRCS} ${GIZMO})
+add_executable(kiss_icp_lidar_odometry main.cpp  lidar_odometry_utils.cpp Params.cpp ${IMGUI_SRCS} ${GIZMO})
 set_target_properties(kiss_icp_lidar_odometry PROPERTIES CXX_STANDARD 20)
 if (WIN32)
     include(3rdparty/kiss-icp/cpp/kiss_icp/cmake/CompilerOptions.cmake)
