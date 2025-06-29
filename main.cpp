@@ -429,13 +429,18 @@ void IcpButton()
                     const Eigen::Affine3d imuPose2 {m2};
 
                     const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
-                    auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
-                    imuUpdate = imuUpdate.inverse();
-                    rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.log().transpose().format(CSVFormat)<< std::endl;
+                    auto imuUpdate = Sophus::SE3d::fitToSE3(imuPose.matrix());
+                    rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
                     if (globals::params.useImu)
                     {
-                        icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
+                        auto tangentImu = imuUpdate.log();
+                        auto tangentDelta = icp.delta().log();
+                        tangentDelta[3] = tangentImu[3]; // keep z rotation
+                        tangentDelta[4] = tangentImu[4]; // keep x rotation
+                        tangentDelta[5] = tangentImu[5]; // keep y rotation
+                        icp.delta() =  Sophus::SE3d::exp(tangentDelta);
                     }
+
                 }
 
                 if (globals::params.useGNSSSpeed)
