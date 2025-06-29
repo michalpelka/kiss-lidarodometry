@@ -420,16 +420,24 @@ void IcpButton()
 
 
                 const double query_time1 = frame.timestamp_hardware.back();
-                const double query_time2 = frame.timestamp_hardware.front();
-                const Eigen::Affine3d imuPose1 {getInterpolatedPose(globals::imuTrajectory, query_time1)};
-                const Eigen::Affine3d imuPose2 {getInterpolatedPose(globals::imuTrajectory, query_time2)};
-                const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
-                auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
-                imuUpdate = imuUpdate.inverse();
-                if (globals::params.useImu)
+                const double query_time2 = query_time1 + globals::params.timestamp_per_icp;
+                const auto m1 = getInterpolatedPose(globals::imuTrajectory, query_time1);
+                const auto m2 = getInterpolatedPose(globals::imuTrajectory, query_time2);
+                if (!m1.isZero() && !m2.isZero())
                 {
-                    icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
+                    const Eigen::Affine3d imuPose1 {m1};
+                    const Eigen::Affine3d imuPose2 {m2};
+
+                    const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
+                    auto imuUpdate = Sophus::SE3d(imuPose.rotation(), imuPose.translation());
+                    imuUpdate = imuUpdate.inverse();
+                    rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.log().transpose().format(CSVFormat)<< std::endl;
+                    if (globals::params.useImu)
+                    {
+                        icp.delta() = Sophus::SE3 (imuPose.rotation(), imuPose.translation());
+                    }
                 }
+
                 if (globals::params.useGNSSSpeed)
                 {
                     // get speed at query_time2
@@ -450,7 +458,6 @@ void IcpButton()
                     }
 
                 }
-                rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.log().transpose().format(CSVFormat)<< std::endl;
 
                 auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
 
