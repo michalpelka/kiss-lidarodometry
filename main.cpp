@@ -315,11 +315,7 @@ bool LoadData(std::vector<std::string> input_file_names)
             globals::imuTrajectory[timestamp_pair.first] = t.matrix();
         }
 
-
-
         return true;
-
-
     }
 
     return false;
@@ -342,11 +338,35 @@ void LoadDataButton()
     std::thread t1(t);
     t1.join();
 
-    if (!LoadData(input_file_names))
+    if (!input_file_names.empty())
     {
-        pfd::message("Error", "please select files correctly", pfd::choice::ok);
-        std::cout << "please select files correctly" << std::endl;
+        // ok, let try to scan directory
+        const auto firstFilename = input_file_names.front();
+
+        auto dir = fs::path(firstFilename).parent_path();
+        std::cout << "Trying to scan directory: " << dir << std::endl;
+        std::vector<std::string> allFiles;
+        for (const auto& entry : fs::directory_iterator(dir))
+        {
+            if (entry.is_regular_file())
+            {
+                const auto fn = entry.path().string();
+                if (fn.ends_with(".laz") || fn.ends_with(".las") || fn.ends_with(".csv") || fn.ends_with(".nmea"))
+                {
+                    allFiles.push_back(fn);
+                }
+            }
+        }
+        if (LoadData(allFiles))
+        {
+            return;
+        }
     }
+
+
+    pfd::message("Error", "please select files correctly", pfd::choice::ok);
+    std::cout << "please select files correctly" << std::endl;
+
 }
 
 
@@ -354,6 +374,11 @@ void IcpButton()
 {
     if (globals::icpRunning)
     {
+        return;
+    }
+    if (globals::pointsPerFile.size() == 0)
+    {
+        pfd::message("Error", "please load data first", pfd::choice::ok);
         return;
     }
     globals::icpRunning.store(true);
@@ -575,10 +600,20 @@ void lidar_odometry_gui()
         }
         if (ImGui::Button("save session"))
         {
+            if (globals::pointsPerFile.size() == 0)
+            {
+                pfd::message("Error", "please load data first", pfd::choice::ok);
+                return;
+            }
             SaveSession();
         }
         if (ImGui::Button("save metascan"))
         {
+            if (globals::pointsPerFile.size() == 0)
+            {
+                pfd::message("Error", "please load data first", pfd::choice::ok);
+                return;
+            }
             SaveMetascan("metascan.laz");
         }
         if (globals::icpRunning)
