@@ -269,36 +269,6 @@ bool LoadData(std::vector<std::string> input_file_names)
             [&](const std::string& fn)
             {
                 return DelayedPoints(fn, preloadedCalibration, globals::params.filter_threshold_xy);
-                // // Load mapping from id to sn
-                // fs::path fnSn(fn);
-                // fnSn.replace_extension(".sn");
-                //
-                // // GetId of Imu to use
-                // const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
-                // auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, preloadedCalibration);
-                // auto data = load_point_cloud(fn.c_str(), true, globals::params.filter_threshold_xy, calibration);
-                //
-                // if (fn == laz_files.front())
-                // {
-                //     fs::path calibrationValidtationFile = wdp / "calibrationValidation.asc";
-                //
-                //     std::ofstream testPointcloud{ calibrationValidtationFile.c_str() };
-                //     for (const auto& p : data)
-                //     {
-                //         testPointcloud << p.point.x() << "\t" << p.point.y() << "\t" << p.point.z() << "\t" << p.intensity << "\t"
-                //                        << (int)p.lidarid << "\n";
-                //     }
-                // }
-                //
-                // std::unique_lock lck(globals::mtx);
-                // for (const auto& [id, calib] : calibration)
-                // {
-                //     std::cout << " id : " << id << std::endl;
-                //     std::cout << calib.matrix() << std::endl;
-                // }
-                // return data;
-                // // std::cout << fn << std::endl;
-                // //
             });
         std::cout << "std::transform finished" << std::endl;
 
@@ -424,6 +394,56 @@ void LoadDataButton()
 }
 
 
+std::tuple<kiss_icp::pipeline::KissICP::Vector3dVector, kiss_icp::pipeline::KissICP::Vector3dVector> PerformICPOnFrame(const RegisteredFrame& frame, kiss_icp::pipeline::KissICP & icp)
+{
+          const double query_time1 = frame.timestamp_hardware.back();
+            const double query_time2 = query_time1 + globals::params.timestamp_per_icp;
+            const auto m1 = getInterpolatedPose(globals::imuTrajectory, query_time1);
+            const auto m2 = getInterpolatedPose(globals::imuTrajectory, query_time2);
+            if (!m1.isZero() && !m2.isZero())
+            {
+                const Eigen::Affine3d imuPose1 {m1};
+                const Eigen::Affine3d imuPose2 {m2};
+
+                const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
+                auto imuUpdate = Sophus::SE3d::fitToSE3(imuPose.matrix());
+                //rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
+                if (globals::params.useImu)
+                {
+                    auto tangentImu = imuUpdate.log();
+                    auto tangentDelta = icp.delta().log();
+                    tangentDelta[3] = tangentImu[3]; // keep z rotation
+                    tangentDelta[4] = tangentImu[4]; // keep x rotation
+                    tangentDelta[5] = tangentImu[5]; // keep y rotation
+                    icp.delta() =  Sophus::SE3d::exp(tangentDelta);
+                }
+
+            }
+
+            if (globals::params.useGNSSSpeed)
+            {
+                // get speed at query_time2
+                auto it = std::lower_bound(globals::gnssSpeed.begin(), globals::gnssSpeed.end(), query_time2,
+                    [](const auto& pair, double time) { return pair.first < time; });
+
+                if ( it != globals::gnssSpeed.end())
+                {
+                    const double gnssSpeed = it->second;
+
+                    globals::currentGnssSpeed.store(gnssSpeed);
+                    if (gnssSpeed > globals::params.minGNSSSpeed)
+                    {
+                        auto tangent = icp.delta().log();
+                        tangent[0] = it->second  * globals::params.timestamp_per_icp;
+                        icp.delta() = Sophus::SE3d::exp(tangent);
+                    }
+                }
+
+            }
+            return icp.RegisterFrame(frame.points, frame.timestamps_offset);
+}
+
+
 void IcpButton()
 {
     if (globals::icpRunning)
@@ -478,7 +498,6 @@ void IcpButton()
                     file.ReleaseData();
                 }
             }
-            Eigen::Affine3d lastTrajectory = Eigen::Affine3d::Identity();
 
             std::ofstream gnssSpeeds;
             gnssSpeeds.open("gnss_speeds.csv");
@@ -498,56 +517,8 @@ void IcpButton()
             for (size_t i = 0; i < globals::registeredFrames.size(); ++i)
             {
                 auto& frame = globals::registeredFrames[i];
-                // query imu trajectory
 
-
-                const double query_time1 = frame.timestamp_hardware.back();
-                const double query_time2 = query_time1 + globals::params.timestamp_per_icp;
-                const auto m1 = getInterpolatedPose(globals::imuTrajectory, query_time1);
-                const auto m2 = getInterpolatedPose(globals::imuTrajectory, query_time2);
-                if (!m1.isZero() && !m2.isZero())
-                {
-                    const Eigen::Affine3d imuPose1 {m1};
-                    const Eigen::Affine3d imuPose2 {m2};
-
-                    const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
-                    auto imuUpdate = Sophus::SE3d::fitToSE3(imuPose.matrix());
-                    rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
-                    if (globals::params.useImu)
-                    {
-                        auto tangentImu = imuUpdate.log();
-                        auto tangentDelta = icp.delta().log();
-                        tangentDelta[3] = tangentImu[3]; // keep z rotation
-                        tangentDelta[4] = tangentImu[4]; // keep x rotation
-                        tangentDelta[5] = tangentImu[5]; // keep y rotation
-                        icp.delta() =  Sophus::SE3d::exp(tangentDelta);
-                    }
-
-                }
-
-                if (globals::params.useGNSSSpeed)
-                {
-                    // get speed at query_time2
-                    auto it = std::lower_bound(globals::gnssSpeed.begin(), globals::gnssSpeed.end(), query_time2,
-                        [](const auto& pair, double time) { return pair.first < time; });
-
-                    if ( it != globals::gnssSpeed.end())
-                    {
-                        const double gnssSpeed = it->second;
-
-                        globals::currentGnssSpeed.store(gnssSpeed);
-                        if (gnssSpeed > globals::params.minGNSSSpeed)
-                        {
-                            auto tangent = icp.delta().log();
-                            tangent[0] = it->second  * globals::params.timestamp_per_icp;
-                            icp.delta() = Sophus::SE3d::exp(tangent);
-                        }
-                    }
-
-                }
-
-                auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
-
+                auto [registered_frame, registered_frame_timestamps] = PerformICPOnFrame(frame, icp);
                 rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
 
                 std::unique_lock lck(globals::mtx);
@@ -733,6 +704,7 @@ void mouse(int glut_button, int state, int x, int y)
         io.MouseDown[button] = true;
     if (button != -1 && state == GLUT_UP)
         io.MouseDown[button] = false;
+
 
     if (!io.WantCaptureMouse)
     {
