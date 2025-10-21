@@ -126,6 +126,56 @@ std::vector<Point3Di> toPoint3DiV(const std::vector<Eigen::Vector3d>& points, co
     return result;
 }
 
+
+class DelayedPoints
+{
+    std::vector<Point3Di> m_data;
+    std::string m_filename;
+    std::unordered_map<std::string, Eigen::Affine3d> m_calibration;
+    float m_filter_threshold_xy = 0.0;
+public:
+    DelayedPoints() = default;
+    DelayedPoints(const std::string& filename, const std::unordered_map<std::string, Eigen::Affine3d> & calibration, float filter_threshold_xy):
+        m_filename(filename), m_calibration(calibration), m_filter_threshold_xy(filter_threshold_xy)
+    {
+    }
+
+    void LoadData()
+    {
+        if (m_data.size() > 0)
+        {
+            return;
+        }
+
+        // Load mapping from id to sn
+        fs::path fnSn(m_filename);
+        fnSn.replace_extension(".sn");
+
+
+        const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
+        auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, m_calibration);
+        auto data = load_point_cloud(m_filename.c_str(), true, m_filter_threshold_xy, calibration);
+        m_data = data;
+    }
+
+    void ReleaseData()
+    {
+        m_data.clear();
+    }
+
+    const std::vector<Point3Di>& GetData() const
+    {
+        return m_data;
+    }
+
+    std::vector<Point3Di>& GetData()
+    {
+        return m_data;
+    }
+
+};
+
+
 namespace globals
 {
     float rotate_x = 0.0, rotate_y = 0.0;
@@ -144,7 +194,7 @@ namespace globals
 
     std::mutex mtx;
     std::vector<RegisteredFrame> registeredFrames;
-    std::vector<std::vector<Point3Di>> pointsPerFile;
+    std::vector<DelayedPoints> pointsPerFile;
     std::vector<Eigen::Vector3d> localMap;
     std::thread icpThread;
     std::atomic<bool> icpRunning{ false };
@@ -154,6 +204,9 @@ namespace globals
     std::map<double, float> gnssSpeed;
 
 } // namespace globals
+
+
+
 
 
 bool LoadData(std::vector<std::string> input_file_names)
@@ -209,42 +262,43 @@ bool LoadData(std::vector<std::string> input_file_names)
         }
 
         std::transform(
-            std::execution::par_unseq,
+            std::execution::seq,
             std::begin(laz_files),
             std::end(laz_files),
             std::begin(globals::pointsPerFile),
             [&](const std::string& fn)
             {
-                // Load mapping from id to sn
-                fs::path fnSn(fn);
-                fnSn.replace_extension(".sn");
-
-                // GetId of Imu to use
-                const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
-                auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, preloadedCalibration);
-                auto data = load_point_cloud(fn.c_str(), true, globals::params.filter_threshold_xy, calibration);
-
-                if (fn == laz_files.front())
-                {
-                    fs::path calibrationValidtationFile = wdp / "calibrationValidation.asc";
-
-                    std::ofstream testPointcloud{ calibrationValidtationFile.c_str() };
-                    for (const auto& p : data)
-                    {
-                        testPointcloud << p.point.x() << "\t" << p.point.y() << "\t" << p.point.z() << "\t" << p.intensity << "\t"
-                                       << (int)p.lidarid << "\n";
-                    }
-                }
-
-                std::unique_lock lck(globals::mtx);
-                for (const auto& [id, calib] : calibration)
-                {
-                    std::cout << " id : " << id << std::endl;
-                    std::cout << calib.matrix() << std::endl;
-                }
-                return data;
-                // std::cout << fn << std::endl;
+                return DelayedPoints(fn, preloadedCalibration, globals::params.filter_threshold_xy);
+                // // Load mapping from id to sn
+                // fs::path fnSn(fn);
+                // fnSn.replace_extension(".sn");
                 //
+                // // GetId of Imu to use
+                // const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
+                // auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, preloadedCalibration);
+                // auto data = load_point_cloud(fn.c_str(), true, globals::params.filter_threshold_xy, calibration);
+                //
+                // if (fn == laz_files.front())
+                // {
+                //     fs::path calibrationValidtationFile = wdp / "calibrationValidation.asc";
+                //
+                //     std::ofstream testPointcloud{ calibrationValidtationFile.c_str() };
+                //     for (const auto& p : data)
+                //     {
+                //         testPointcloud << p.point.x() << "\t" << p.point.y() << "\t" << p.point.z() << "\t" << p.intensity << "\t"
+                //                        << (int)p.lidarid << "\n";
+                //     }
+                // }
+                //
+                // std::unique_lock lck(globals::mtx);
+                // for (const auto& [id, calib] : calibration)
+                // {
+                //     std::cout << " id : " << id << std::endl;
+                //     std::cout << calib.matrix() << std::endl;
+                // }
+                // return data;
+                // // std::cout << fn << std::endl;
+                // //
             });
         std::cout << "std::transform finished" << std::endl;
 
@@ -395,9 +449,11 @@ void IcpButton()
 
                 double last_timestamp = 0;
 
-                for (const auto& file : globals::pointsPerFile)
+                for (auto& file : globals::pointsPerFile)
                 {
-                    for (const auto& point : file)
+                    // load data from file
+                    file.LoadData();
+                    for (const auto& point : file.GetData())
                     {
                         double timestamp = point.timestamp;
                         if (timestamp > 0)
@@ -419,6 +475,7 @@ void IcpButton()
                             }
                         }
                     }
+                    file.ReleaseData();
                 }
             }
             Eigen::Affine3d lastTrajectory = Eigen::Affine3d::Identity();
