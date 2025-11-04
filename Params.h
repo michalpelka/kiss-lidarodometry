@@ -13,6 +13,7 @@ namespace Params
     bool useImu = true;
     bool useGNSSSpeed = true; // use GNSS speed for initial guess
     float minGNSSSpeed = 5.0f; // minimum speed in m/s to use GNSS speed for registration
+    bool loadDataDuringICP = false;
   };
 
   template<typename T>
