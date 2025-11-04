@@ -18,24 +18,9 @@
 #include <nlohmann/json.hpp>
 #include "nmeaParser.h"
 #include "Params.h"
+#include "RegisteredFrame.h"
+
 namespace fs = std::filesystem;
-
-struct TrajectoryNode
-{
-    Eigen::Affine3d pose;
-    double hardware_timestamp;
-    double unix_timestamp;
-};
-struct RegisteredFrame
-{
-    std::vector<Eigen::Vector3d> points;
-    std::vector<float> intensities;
-    std::vector<double> timestamps_offset;
-    std::vector<double> timestamp_hardware;
-    Eigen::Affine3d pose;
-    std::vector<TrajectoryNode> trajectory;
-};
-
 
 void SaveTrj(const std::string& pathtrj, const std::vector<TrajectoryNode>& trajectory)
 {
@@ -60,11 +45,12 @@ void SaveTrj(const std::string& pathtrj, const std::vector<TrajectoryNode>& traj
     outfile.close();
 }
 
-std::vector<Point3Di> CreateMetascan(const std::vector<RegisteredFrame>& frames)
+std::vector<Point3Di> CreateMetascan(std::vector<RegisteredFrame>& frames)
 {
     std::vector<Point3Di> result;
-    for (const auto& currentOriginalFrame : frames)
+    for (auto& currentOriginalFrame : frames)
     {
+        currentOriginalFrame.UnCache();
         for (size_t i = 0; i < currentOriginalFrame.points.size(); ++i)
         {
            const auto& originalPoint = currentOriginalFrame.points[i];
@@ -75,17 +61,19 @@ std::vector<Point3Di> CreateMetascan(const std::vector<RegisteredFrame>& frames)
             p.intensity = currentOriginalFrame.intensities[i];;
             result.push_back(p);
         }
+        currentOriginalFrame.RelaseData();
     }
     return result;
 }
-std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame>& frames, int maxNumberOfPoints = 200000)
+std::vector<RegisteredFrame> ConcatenateFrames( std::vector<RegisteredFrame>& frames, int maxNumberOfPoints = 200000)
 {
     std::vector<RegisteredFrame> result;
     result.resize(1);
     result.back().pose = frames.front().pose;
     Eigen::Affine3d currentIncrement = Eigen::Affine3d::Identity();
-    for (const auto& currentOriginalFrame : frames)
+    for (auto& currentOriginalFrame : frames)
     {
+        currentOriginalFrame.UnCache();
         TrajectoryNode currentTrajectoryNode;
         currentIncrement = result.back().pose.inverse() * currentOriginalFrame.pose;
         currentTrajectoryNode.hardware_timestamp = currentOriginalFrame.timestamp_hardware.front();
@@ -108,6 +96,7 @@ std::vector<RegisteredFrame> ConcatenateFrames(const std::vector<RegisteredFrame
                 currentIncrement = result.back().pose.inverse() * currentOriginalFrame.pose;
             }
         }
+        currentOriginalFrame.RelaseData();
     }
     std::cout << "Concatenated " << frames.size() << " frames into " << result.size() << " frames" << std::endl;
     return result;
@@ -126,6 +115,56 @@ std::vector<Point3Di> toPoint3DiV(const std::vector<Eigen::Vector3d>& points, co
     return result;
 }
 
+
+class DelayedPoints
+{
+    std::vector<Point3Di> m_data;
+    std::string m_filename;
+    std::unordered_map<std::string, Eigen::Affine3d> m_calibration;
+    float m_filter_threshold_xy = 0.0;
+public:
+    DelayedPoints() = default;
+    DelayedPoints(const std::string& filename, const std::unordered_map<std::string, Eigen::Affine3d> & calibration, float filter_threshold_xy):
+        m_filename(filename), m_calibration(calibration), m_filter_threshold_xy(filter_threshold_xy)
+    {
+    }
+
+    void LoadData()
+    {
+        if (m_data.size() > 0)
+        {
+            return;
+        }
+
+        // Load mapping from id to sn
+        fs::path fnSn(m_filename);
+        fnSn.replace_extension(".sn");
+
+
+        const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
+        auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, m_calibration);
+        auto data = load_point_cloud(m_filename.c_str(), true, m_filter_threshold_xy, calibration);
+        m_data = data;
+    }
+
+    void ReleaseData()
+    {
+        m_data.clear();
+    }
+
+    const std::vector<Point3Di>& GetData() const
+    {
+        return m_data;
+    }
+
+    std::vector<Point3Di>& GetData()
+    {
+        return m_data;
+    }
+
+};
+
+
 namespace globals
 {
     float rotate_x = 0.0, rotate_y = 0.0;
@@ -133,7 +172,7 @@ namespace globals
     float translate_z = -50.0;
     const unsigned int window_width = 800;
     const unsigned int window_height = 600;
-    static ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+    ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
     std::string working_directory = "";
     int mouse_buttons = 0;
     int mouse_old_x, mouse_old_y;
@@ -144,7 +183,7 @@ namespace globals
 
     std::mutex mtx;
     std::vector<RegisteredFrame> registeredFrames;
-    std::vector<std::vector<Point3Di>> pointsPerFile;
+    std::vector<DelayedPoints> pointsPerFile;
     std::vector<Eigen::Vector3d> localMap;
     std::thread icpThread;
     std::atomic<bool> icpRunning{ false };
@@ -209,43 +248,20 @@ bool LoadData(std::vector<std::string> input_file_names)
         }
 
         std::transform(
-            std::execution::par_unseq,
+            std::execution::par,
             std::begin(laz_files),
             std::end(laz_files),
             std::begin(globals::pointsPerFile),
             [&](const std::string& fn)
             {
-                // Load mapping from id to sn
-                fs::path fnSn(fn);
-                fnSn.replace_extension(".sn");
-
-                // GetId of Imu to use
-                const auto idToSn = MLvxCalib::GetIdToSnMapping(fnSn.string());
-                auto calibration = MLvxCalib::CombineIntoCalibration(idToSn, preloadedCalibration);
-                auto data = load_point_cloud(fn.c_str(), true, globals::params.filter_threshold_xy, calibration);
-
-                if (fn == laz_files.front())
+                auto d= DelayedPoints(fn, preloadedCalibration, globals::params.filter_threshold_xy);
+                if (!globals::params.loadDataDuringICP)
                 {
-                    fs::path calibrationValidtationFile = wdp / "calibrationValidation.asc";
-
-                    std::ofstream testPointcloud{ calibrationValidtationFile.c_str() };
-                    for (const auto& p : data)
-                    {
-                        testPointcloud << p.point.x() << "\t" << p.point.y() << "\t" << p.point.z() << "\t" << p.intensity << "\t"
-                                       << (int)p.lidarid << "\n";
-                    }
+                    d.LoadData();
                 }
-
-                std::unique_lock lck(globals::mtx);
-                for (const auto& [id, calib] : calibration)
-                {
-                    std::cout << " id : " << id << std::endl;
-                    std::cout << calib.matrix() << std::endl;
-                }
-                return data;
-                // std::cout << fn << std::endl;
-                //
+                return d;
             });
+
         std::cout << "std::transform finished" << std::endl;
 
         // load IMU data
@@ -369,6 +385,57 @@ void LoadDataButton()
 
 }
 
+std::tuple<kiss_icp::pipeline::KissICP::Vector3dVector, kiss_icp::pipeline::KissICP::Vector3dVector, Sophus::SE3d> PerformICPOnFrame(const RegisteredFrame& frame, kiss_icp::pipeline::KissICP & icp)
+{
+        Sophus::SE3d imuUpdate;
+          const double query_time1 = frame.timestamp_hardware.back();
+            const double query_time2 = query_time1 + globals::params.timestamp_per_icp;
+            const auto m1 = getInterpolatedPose(globals::imuTrajectory, query_time1);
+            const auto m2 = getInterpolatedPose(globals::imuTrajectory, query_time2);
+            if (!m1.isZero() && !m2.isZero())
+            {
+                const Eigen::Affine3d imuPose1 {m1};
+                const Eigen::Affine3d imuPose2 {m2};
+
+                const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
+                imuUpdate = Sophus::SE3d::fitToSE3(imuPose.matrix());
+                //rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
+                if (globals::params.useImu)
+                {
+                    auto tangentImu = imuUpdate.log();
+                    auto tangentDelta = icp.delta().log();
+                    tangentDelta[3] = tangentImu[3]; // keep z rotation
+                    tangentDelta[4] = tangentImu[4]; // keep x rotation
+                    tangentDelta[5] = tangentImu[5]; // keep y rotation
+                    icp.delta() =  Sophus::SE3d::exp(tangentDelta);
+                }
+
+            }
+
+            if (globals::params.useGNSSSpeed)
+            {
+                // get speed at query_time2
+                auto it = std::lower_bound(globals::gnssSpeed.begin(), globals::gnssSpeed.end(), query_time2,
+                    [](const auto& pair, double time) { return pair.first < time; });
+
+                if ( it != globals::gnssSpeed.end())
+                {
+                    const double gnssSpeed = it->second;
+
+                    globals::currentGnssSpeed.store(gnssSpeed);
+                    if (gnssSpeed > globals::params.minGNSSSpeed)
+                    {
+                        auto tangent = icp.delta().log();
+                        tangent[0] = it->second  * globals::params.timestamp_per_icp;
+                        icp.delta() = Sophus::SE3d::exp(tangent);
+                    }
+                }
+
+            }
+            const auto [a, b] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
+            return std::tuple(a,b,imuUpdate);
+}
+
 
 void IcpButton()
 {
@@ -389,39 +456,6 @@ void IcpButton()
 
             using namespace kiss_icp::pipeline;
             KissICP icp(globals::params.icp_config);
-            {
-                std::unique_lock lck(globals::mtx);
-                globals::registeredFrames.resize(1);
-
-                double last_timestamp = 0;
-
-                for (const auto& file : globals::pointsPerFile)
-                {
-                    for (const auto& point : file)
-                    {
-                        double timestamp = point.timestamp;
-                        if (timestamp > 0)
-                        {
-                            if (last_timestamp == 0)
-                            {
-                                last_timestamp = timestamp;
-                            }
-                            auto& lastFrame = globals::registeredFrames.back();
-                            lastFrame.points.emplace_back(point.point);
-                            lastFrame.intensities.emplace_back(point.intensity);
-                            double deltaTime = point.timestamp - last_timestamp;
-                            lastFrame.timestamps_offset.emplace_back(deltaTime);
-                            lastFrame.timestamp_hardware.emplace_back(point.timestamp);
-                            if (deltaTime > globals::params.timestamp_per_icp)
-                            {
-                                last_timestamp = timestamp;
-                                globals::registeredFrames.emplace_back();
-                            }
-                        }
-                    }
-                }
-            }
-            Eigen::Affine3d lastTrajectory = Eigen::Affine3d::Identity();
 
             std::ofstream gnssSpeeds;
             gnssSpeeds.open("gnss_speeds.csv");
@@ -438,66 +472,58 @@ void IcpButton()
             //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
 
             const static Eigen::IOFormat CSVFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n");
-            for (size_t i = 0; i < globals::registeredFrames.size(); ++i)
+
+
+            globals::registeredFrames.resize(1);
+
+            double last_timestamp = 0;
+
+            const double experimentStartTime = globals::imuTrajectory.begin()->first;
+            const double experimentEndTime = globals::imuTrajectory.rbegin()->first;
+            const double experimentDuration = experimentEndTime - experimentStartTime;
+
+            for (auto& file : globals::pointsPerFile)
             {
-                auto& frame = globals::registeredFrames[i];
-                // query imu trajectory
-
-
-                const double query_time1 = frame.timestamp_hardware.back();
-                const double query_time2 = query_time1 + globals::params.timestamp_per_icp;
-                const auto m1 = getInterpolatedPose(globals::imuTrajectory, query_time1);
-                const auto m2 = getInterpolatedPose(globals::imuTrajectory, query_time2);
-                if (!m1.isZero() && !m2.isZero())
+                file.LoadData();
+                for (const auto& point : file.GetData())
                 {
-                    const Eigen::Affine3d imuPose1 {m1};
-                    const Eigen::Affine3d imuPose2 {m2};
-
-                    const Eigen::Affine3d imuPose = imuPose1.inverse() * imuPose2;
-                    auto imuUpdate = Sophus::SE3d::fitToSE3(imuPose.matrix());
-                    rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
-                    if (globals::params.useImu)
+                    const double timestamp = point.timestamp;
+                    if (timestamp > 0)
                     {
-                        auto tangentImu = imuUpdate.log();
-                        auto tangentDelta = icp.delta().log();
-                        tangentDelta[3] = tangentImu[3]; // keep z rotation
-                        tangentDelta[4] = tangentImu[4]; // keep x rotation
-                        tangentDelta[5] = tangentImu[5]; // keep y rotation
-                        icp.delta() =  Sophus::SE3d::exp(tangentDelta);
-                    }
-
-                }
-
-                if (globals::params.useGNSSSpeed)
-                {
-                    // get speed at query_time2
-                    auto it = std::lower_bound(globals::gnssSpeed.begin(), globals::gnssSpeed.end(), query_time2,
-                        [](const auto& pair, double time) { return pair.first < time; });
-
-                    if ( it != globals::gnssSpeed.end())
-                    {
-                        const double gnssSpeed = it->second;
-
-                        globals::currentGnssSpeed.store(gnssSpeed);
-                        if (gnssSpeed > globals::params.minGNSSSpeed)
+                        if (last_timestamp == 0)
                         {
-                            auto tangent = icp.delta().log();
-                            tangent[0] = it->second  * globals::params.timestamp_per_icp;
-                            icp.delta() = Sophus::SE3d::exp(tangent);
+                            last_timestamp = timestamp;
+                        }
+                        auto& lastFrame = globals::registeredFrames.back();
+                        lastFrame.points.emplace_back(point.point);
+                        lastFrame.intensities.emplace_back(point.intensity);
+                        double deltaTime = point.timestamp - last_timestamp;
+                        lastFrame.timestamps_offset.emplace_back(deltaTime);
+                        lastFrame.timestamp_hardware.emplace_back(point.timestamp);
+                        if (deltaTime > globals::params.timestamp_per_icp)
+                        {
+                            auto& frame = globals::registeredFrames.back();
+
+                            auto [registered_frame, registered_frame_timestamps, imuUpdate] = PerformICPOnFrame(frame, icp);
+                            rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
+                            rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
+                            std::unique_lock lck(globals::mtx);
+                            frame.pose = Eigen::Affine3d(icp.pose().matrix());
+                            globals::localMap = icp.LocalMap();
+                            const double durIcp = timestamp - experimentStartTime;
+                            globals::icpProgress.store(durIcp / experimentDuration);
+
+                            // cache data and release for save RAM
+                            frame.Cache();
+                            frame.RelaseData();
+                            last_timestamp = timestamp;
+                            globals::registeredFrames.emplace_back();
                         }
                     }
-
                 }
-
-                auto [registered_frame, registered_frame_timestamps] = icp.RegisterFrame(frame.points, frame.timestamps_offset);
-
-                rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
-
-                std::unique_lock lck(globals::mtx);
-                frame.pose = Eigen::Affine3d(icp.pose().matrix());
-                globals::localMap = icp.LocalMap();
-                globals::icpProgress.store((float)i / globals::registeredFrames.size());
+                file.ReleaseData();
             }
+
             globals::icpRunning.store(false);
             const auto endTime = std::chrono::high_resolution_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime);
@@ -646,7 +672,13 @@ void lidar_odometry_gui()
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("If checked, GNSS speed will be used for guess. ");
         ImGui::InputFloat("minimum GNSS speed (m/s)", &globals::params.minGNSSSpeed);
-        ImGui::SameLine();
+        ImGui::Checkbox("Load Data during ICP", &globals::params.loadDataDuringICP);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("If checked, data will be loaded during ICP. "
+                              "This reduces memory consumption, but increases processing time."
+                              "It also cache intermediatate data. ");
+        }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Mimimum GNSS speed to use for guess. ");
 
@@ -656,6 +688,7 @@ void lidar_odometry_gui()
             auto j = Params::ParamsToJson(globals::params);
             files << j.dump(10);
         }
+        RegisteredFrame::CacheEnabled = globals::params.loadDataDuringICP;
     }
 
     ImGui::End();
@@ -676,6 +709,7 @@ void mouse(int glut_button, int state, int x, int y)
         io.MouseDown[button] = true;
     if (button != -1 && state == GLUT_UP)
         io.MouseDown[button] = false;
+
 
     if (!io.WantCaptureMouse)
     {
@@ -958,6 +992,9 @@ int main(int argc, char* argv[])
             SaveMetascan(*metaScanPath);
         }
     }
+
+    // clear cached data
+    RegisteredFrame::ClearCache();
 
     return 0;
 }

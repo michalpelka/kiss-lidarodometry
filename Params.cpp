@@ -21,6 +21,7 @@ namespace Params
         j["useImu"] = params.useImu;
         j["useGNSSSpeed"] = params.useGNSSSpeed;
         j["minGNSSSpeed"] = params.minGNSSSpeed;
+        j["loadDataDuringICP"] = params.loadDataDuringICP;
 
         return j;
     }
@@ -51,6 +52,7 @@ namespace Params
         LoadIfExists(j, "useImu", params.useImu);
         LoadIfExists(j, "useGNSSSpeed", params.useGNSSSpeed);
         LoadIfExists(j, "minGNSSSpeed", params.minGNSSSpeed);
+        LoadIfExists(j,"loadDataDuringICP", params.loadDataDuringICP);
         return params;
     }
 
