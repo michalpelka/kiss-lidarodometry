@@ -19,8 +19,7 @@ std::set<std::string> RegisteredFrame::CachedFiles;
 RegisteredFrame::RegisteredFrame()
 {
     id = idCounter++;
-
-    cacheFilePath = std::filesystem::temp_directory_path() /"KissLidarOdometry"/ ("registered_frame_cache_" + std::to_string(id) + ".bin");
+    cacheFilePath = (std::filesystem::temp_directory_path() / "KissLidarOdometry" / ("registered_frame_cache_" + std::to_string(id) + ".bin")).string();
 
 }
 
