@@ -248,7 +248,9 @@ bool LoadData(std::vector<std::string> input_file_names)
         }
 
         std::transform(
+#ifndef __APPLE__
             std::execution::par,
+#endif
             std::begin(laz_files),
             std::end(laz_files),
             std::begin(globals::pointsPerFile),
@@ -337,6 +339,26 @@ bool LoadData(std::vector<std::string> input_file_names)
     return false;
 }
 
+// mandeye_controller datasets keep extra GNSS receiver logs in an
+// EXTRA_GNSS/ subfolder next to the lidar/imu files; pull its *.nmea
+// files in since the main directory scan is not recursive.
+std::vector<std::string> CollectExtraGnssFiles(const fs::path& dir)
+{
+    std::vector<std::string> files;
+    const auto extraGnssDir = dir / "EXTRA_GNSS";
+    if (fs::exists(extraGnssDir) && fs::is_directory(extraGnssDir))
+    {
+        for (const auto& entry : fs::directory_iterator(extraGnssDir))
+        {
+            if (entry.is_regular_file() && entry.path().extension() == ".nmea")
+            {
+                files.push_back(entry.path().string());
+            }
+        }
+    }
+    return files;
+}
+
 void LoadDataButton()
 {
     static std::shared_ptr<pfd::open_file> open_file;
@@ -345,7 +367,7 @@ void LoadDataButton()
     const auto t = [&]()
     {
         std::vector<std::string> filters;
-        auto sel = pfd::open_file("Load las files", "C:\\", filters, true).result();
+        auto sel = pfd::open_file("Load las files", fs::current_path().string(), filters, true).result();
         for (int i = 0; i < sel.size(); i++)
         {
             input_file_names.push_back(sel[i]);
@@ -373,6 +395,8 @@ void LoadDataButton()
                 }
             }
         }
+        const auto extraGnssFiles = CollectExtraGnssFiles(dir);
+        allFiles.insert(allFiles.end(), extraGnssFiles.begin(), extraGnssFiles.end());
         if (LoadData(allFiles))
         {
             return;
@@ -457,19 +481,19 @@ void IcpButton()
             using namespace kiss_icp::pipeline;
             KissICP icp(globals::params.icp_config);
 
-            std::ofstream gnssSpeeds;
-            gnssSpeeds.open("gnss_speeds.csv");
-           // gnssSpeeds << "timestamp,speed" << std::endl;
-            for (auto & [timestamp, speed] : globals::gnssSpeed)
-            {
-                gnssSpeeds << std::setprecision(20) <<  double(timestamp) << "," << speed * globals::params.timestamp_per_icp << std::endl;
-            }
-            std::ofstream rotationICP;
-            rotationICP.open("rotation_icp.csv");
-            //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
-            std::ofstream rotationIMU;
-            rotationIMU.open("rotation_imu.csv");
-            //rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
+           //  std::ofstream gnssSpeeds;
+           //  gnssSpeeds.open("gnss_speeds.csv");
+           // // gnssSpeeds << "timestamp,speed" << std::endl;
+           //  for (auto & [timestamp, speed] : globals::gnssSpeed)
+           //  {
+           //      gnssSpeeds << std::setprecision(20) <<  double(timestamp) << "," << speed * globals::params.timestamp_per_icp << std::endl;
+           //  }
+            // std::ofstream rotationICP;
+            // rotationICP.open("rotation_icp.csv");
+            // rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
+            // std::ofstream rotationIMU;
+            // rotationIMU.open("rotation_imu.csv");
+            // rotationICP << "timestamp,delta_x,delta_y,delta_z,delta_qx,delta_qy,delta_qz" << std::endl;
 
             const static Eigen::IOFormat CSVFormat(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", "\n");
 
@@ -505,8 +529,8 @@ void IcpButton()
                             auto& frame = globals::registeredFrames.back();
 
                             auto [registered_frame, registered_frame_timestamps, imuUpdate] = PerformICPOnFrame(frame, icp);
-                            rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
-                            rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
+                            //rotationICP << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << icp.delta().log().transpose().format(CSVFormat)<< std::endl;
+                            //rotationIMU << std::setprecision(20) << frame.timestamp_hardware.front()  << "," << imuUpdate.inverse().log().transpose().format(CSVFormat)<< std::endl;
                             std::unique_lock lck(globals::mtx);
                             frame.pose = Eigen::Affine3d(icp.pose().matrix());
                             globals::localMap = icp.LocalMap();
@@ -728,15 +752,22 @@ void mouse(int glut_button, int state, int x, int y)
 
 void wheel(int button, int dir, int x, int y)
 {
+    // Use reciprocal zoom-in/zoom-out factors so that an equal number of
+    // in/out events exactly cancels out, regardless of order. Trackpads
+    // (macOS in particular) can deliver many jittery, alternating-direction
+    // wheel events per gesture; non-reciprocal factors (e.g. 0.95 in /
+    // 1.05 out) compound into a net drift on every such gesture, which
+    // shows up as the view being unable to zoom out and "jumping" as the
+    // jitter is applied.
+    constexpr float zoomFactor = 1.05f;
     if (dir > 0)
     {
-        globals::translate_z -= 0.05f * globals::translate_z;
+        globals::translate_z /= zoomFactor;
     }
     else
     {
-        globals::translate_z += 0.05f * globals::translate_z;
+        globals::translate_z *= zoomFactor;
     }
-    return;
 }
 
 void reshape(int w, int h)
@@ -825,8 +856,13 @@ void display()
 
     {
         std::unique_lock lck(globals::mtx);
-        for (const auto& frame : globals::registeredFrames)
+        for (int i = 0; i < globals::registeredFrames.size(); ++i)
         {
+            if (i == globals::registeredFrames.size() - 1)
+            {
+                continue;
+            }
+            const auto& frame = globals::registeredFrames[i];
             glPushMatrix();
             Eigen::Matrix4d mat = frame.pose.matrix();
             glMultMatrixd(mat.data());
@@ -952,6 +988,8 @@ int main(int argc, char* argv[])
                 files.push_back(entry.path().string());
             }
         }
+        const auto extraGnssFiles = CollectExtraGnssFiles(*dataSetToProcess);
+        files.insert(files.end(), extraGnssFiles.begin(), extraGnssFiles.end());
 
         const bool isLoadOk = LoadData(files);
         if (isLoadOk)
