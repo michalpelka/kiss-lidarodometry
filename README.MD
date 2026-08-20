@@ -2,6 +2,7 @@
 
 [![Linux](https://github.com/michalpelka/kiss-lidarodometry/actions/workflows/linux.yml/badge.svg)](https://github.com/michalpelka/kiss-lidarodometry/actions/workflows/linux.yml)
 [![Windows](https://github.com/michalpelka/kiss-lidarodometry/actions/workflows/windows.yml/badge.svg)](https://github.com/michalpelka/kiss-lidarodometry/actions/workflows/windows.yml)
+[![macOS](https://github.com/michalpelka/kiss-lidarodometry/actions/workflows/macos.yml/badge.svg)](https://github.com/michalpelka/kiss-lidarodometry/actions/workflows/macos.yml)
 
 This software provides an alternative approach to Lidar odometry in [MapsHD/HDMapping](https://github.com/MapsHD/HDMapping).
 It uses the same data structures and interfaces as the original implementation, but replaces the ICP algorithm with the KISS-ICP algorithm.

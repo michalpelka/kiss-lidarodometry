@@ -22,8 +22,13 @@
 #include <imgui_impl_opengl2.h>
 #include <ImGuizmo.h>
 #include <imgui_internal.h>
+#ifdef __APPLE__
+#include <OpenGL/glu.h>
+#include <OpenGL/gl.h>
+#else
 #include <GL/glu.h>
 #include <GL/gl.h>
+#endif
 #include "Fusion/Fusion.h"
 
 
