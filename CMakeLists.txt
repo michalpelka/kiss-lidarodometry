@@ -23,6 +23,13 @@ include_directories(
 
 
 message("Windows, building laszip from source")
+if(APPLE)
+    # macOS's off_t is already 64-bit and off64_t is not defined by the
+    # system headers, unlike Linux/MinGW. LASzip's non-Windows fseeko()
+    # path casts to off64_t, so alias it to off_t for Apple builds instead
+    # of patching the pinned submodule source.
+    add_compile_definitions(off64_t=off_t)
+endif()
 add_subdirectory(3rdparty/LASzip/)
 include_directories(3rdparty/LASzip/include)
 add_subdirectory(3rdparty/Fusion)
